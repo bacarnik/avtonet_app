@@ -28,6 +28,7 @@ void callbackDispatcher() {
     }
 
     final storage = StorageService();
+    await storage.recordWorkerStart(now);
 
     // REMOVED: Redundant lock check here. ScanEngine.scan handles locking.
     // This was causing the worker to block itself.
@@ -74,6 +75,15 @@ void callbackDispatcher() {
         logger: log, 
         isAuto: true,
       );
+
+      log('========== SCAN RESULT ==========');
+      log('ok=${result.ok}');
+      log('successCount=${result.successCount}');
+      log('failCount=${result.failCount}');
+      log('newListings=${result.newListings}');
+      log('notificationsSent=${result.notificationsSent}');
+      log('error=${result.error}');
+      log('=================================');
 
       stopwatch.stop();
       log('[WORKER FINISHED] - Duration: ${stopwatch.elapsed.inSeconds}s');

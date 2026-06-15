@@ -195,6 +195,8 @@ class AvtonetScraperService {
     final List<CarListing> allNewListings = [];
     int totalChecked = 0;
     int totalPages = 0;
+    int consecutivePageFailures = 0;
+    const int maxConsecutivePageFailures = 3;
     final Set<String> seenInThisScan = {};
     
     int consecutiveKnownPages = 0;
@@ -215,61 +217,113 @@ class AvtonetScraperService {
           pageUrl = '$pageUrl&stran=$page';
         }
         
-        String html;
-        try {
-          html = await _fetch(pageUrl, method: method);
-        } catch (e) {
-          debugPrint('[PAGE ERROR] page=$page reason=$e');
-          if (page == 1) return ScrapeResult.failure(e.toString());
-          break; 
+        String? html;
+        if (page == 1) {
+          // Special handling for page 1: retry up to 3 times
+          for (int retry = 0; retry <= 3; retry++) {
+            try {
+              debugPrint('[PAGE START] page=1 attempt=${retry + 1} url=$pageUrl');
+              html = await _fetch(pageUrl, method: method);
+              debugPrint('[PAGE SUCCESS] page=1');
+              consecutivePageFailures = 0;
+              break;
+            } catch (e) {
+              debugPrint('[PAGE FAILED] page=1 attempt=${retry + 1} error=$e');
+              if (retry == 3) {
+                debugPrint('[PAGINATION ABORTED] Page 1 failed after retries.');
+                return ScrapeResult.failure('Page 1 failure: $e');
+              }
+              debugPrint('[PAGE RETRY] page=1 in 2s...');
+              await Future.delayed(const Duration(seconds: 2));
+            }
+          }
+        } else {
+          try {
+            debugPrint('[PAGE START] page=$page url=$pageUrl');
+            html = await _fetch(pageUrl, method: method);
+            debugPrint('[PAGE SUCCESS] page=$page');
+            consecutivePageFailures = 0;
+          } catch (e) {
+            consecutivePageFailures++;
+            debugPrint('[PAGE FAILED] page=$page consecutiveFailures=$consecutivePageFailures error=$e');
+            if (consecutivePageFailures >= maxConsecutivePageFailures) {
+              debugPrint('[PAGINATION ABORTED] Too many consecutive failures at page $page');
+              break pageLoop;
+            }
+            debugPrint('[PAGE SKIPPED] Continuing to next page...');
+            continue pageLoop;
+          }
         }
 
-        debugPrint('[HTML RECEIVED] length=${html.length}');
-        
+        if (html == null) continue; // Should not happen due to logic above
+
         final List<CarListing> pageListings = await compute(_parseListingsInBackground, {
           'html': html,
           'configId': config.id,
           'seenIds': seenIds,
         });
 
-        debugPrint('[PARSED ADS COUNT] ${pageListings.length}');
+        final int topAdsOnPage = pageListings.where((l) => l.isTopOffer).length;
+        final int normalAdsOnPage = pageListings.length - topAdsOnPage;
+        
+        debugPrint('[PAGE RESULT] page=$page listings=${pageListings.length} (Normal: $normalAdsOnPage, Top: $topAdsOnPage)');
+        
         if (pageListings.isEmpty) {
           if (html.length > 10000) {
-            debugPrint('[PARSER FAILURE]');
-            debugPrint('[HTML RECEIVED BUT NO LISTINGS FOUND]');
+            debugPrint('[PARSER FAILURE] HTML received but no listings found.');
           }
           break;
         }
 
         int newListingsOnPage = 0;
+        int newNormalListingsOnPage = 0;
+        
         for (var listing in pageListings) {
-          if (!seenInThisScan.add(listing.id)) continue; 
+          if (totalChecked < 200) {
+            debugPrint('[ID TRACE] id=${listing.id} page=$page count=$totalChecked');
+          }
+          debugPrint('[LISTING] id=${listing.id} title=${listing.title} isTop=${listing.isTopOffer}');
+          if (!seenInThisScan.add(listing.id)) {
+            debugPrint('[DUPLICATE IN CURRENT SCAN] id=${listing.id}');
+            continue;
+          }
           totalChecked++;
 
-          if (!seenIds.contains(listing.id)) {
+          final alreadySeen = seenIds.contains(listing.id);
+          debugPrint('[DUPLICATE CHECK] id=${listing.id} existsInSeenIds=$alreadySeen');
+
+          if (!alreadySeen) {
             allNewListings.add(listing);
             newListingsOnPage++;
-            debugPrint('[NEW ID] ${listing.id}');
-          } else {
-            debugPrint('[DUPLICATE ID] ${listing.id}');
+            if (!listing.isTopOffer) {
+              newNormalListingsOnPage++;
+            }
+            debugPrint('[NEW ID ADDED TO RESULTS] ${listing.id}');
           }
         }
 
         totalPages++;
-        if (newListingsOnPage == 0 && pageListings.any((l) => !l.isTopOffer)) {
+        
+        // P PAGINATION STOP LOGIC REFACTORED:
+        // 1. Ignore TOP PONUDBA ads for caught-up calculations.
+        // 2. Require minimum depth (4 pages AND 150 normal listings) before stopping.
+        
+        bool canTriggerStop = page >= 4 && totalChecked >= 150;
+        
+        if (newNormalListingsOnPage == 0 && normalAdsOnPage > 0) {
           consecutiveKnownPages++;
-          if (consecutiveKnownPages >= maxKnownPagesLimit) {
-            debugPrint('[SCAN STOP] Multiple pages with only known ads. Caught up.');
+          debugPrint('[KNOWN PAGE COUNTER] page=$page consecutiveKnown=$consecutiveKnownPages (Stop triggerable: $canTriggerStop)');
+          
+          if (canTriggerStop && consecutiveKnownPages >= maxKnownPagesLimit) {
+            debugPrint('[STOP REASON] Multiple pages with only known NORMAL ads. Caught up at page $page.');
             break pageLoop;
           }
-        } else if (newListingsOnPage > 0) {
+        } else if (newNormalListingsOnPage > 0) {
+          debugPrint('[PAGINATION DEBUG] Resetting known page counter (Found $newNormalListingsOnPage new normal ads)');
           consecutiveKnownPages = 0;
         }
 
-        // Check if there's a "next page" indicator in HTML to avoid scanning empty pages
-        if (!html.contains('stran=${page + 1}') && !html.contains('next') && page > 1) {
-           // Basic check for next page presence
-        }
+        debugPrint('[PAGINATION DEBUG] page=$page totalNormalChecked=$totalChecked stopTriggerable=$canTriggerStop');
       }
 
       debugPrint('[SCAN SUMMARY] pages=$totalPages checked=$totalChecked new=${allNewListings.length}');

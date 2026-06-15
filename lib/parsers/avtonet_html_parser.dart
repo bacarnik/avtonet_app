@@ -61,6 +61,9 @@ class AvtonetHtmlParser {
 
     for (int i = 0; i < rows.length; i++) {
       final element = rows[i];
+      if (i == 0) {
+        debugPrint('[PARSER DEBUG] Row 0 HTML snippet: ${element.outerHtml.substring(0, min(1000, element.outerHtml.length))}');
+      }
       String currentIdForError = 'unknown';
       try {
         final titleEl = element.querySelector('div.GO-Results-Naziv');

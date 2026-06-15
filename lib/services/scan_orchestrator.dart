@@ -144,27 +144,43 @@ class ScanEngine {
             final parsed = result.listings;
             final matched = <CarListing>[];
 
+            int filterMatchedCount = 0;
+            int notificationAttemptedCount = 0;
+
+            debugPrint('[TOTAL PARSED FOR FILTER ${config.name}] count=${parsed.length}');
+
             for (final rawListing in parsed) {
               CarListing l = rawListing;
               
               final match = FilterMatcher.matches(l, config);
-              debugPrint('[FILTER MATCHES] id=${l.id} filter=${config.name} match=${match.isMatch}');
+              debugPrint('[FILTER MATCH] id=${l.id} filter=${config.name} matched=${match.isMatch}');
 
               if (match.isMatch) {
-                if (!seenIds.contains(l.id)) {
+                filterMatchedCount++;
+                final alreadySeenGlobal = seenIds.contains(l.id);
+                debugPrint('[DUPLICATE CHECK GLOBAL] id=${l.id} existsInSeenIds=$alreadySeenGlobal');
+
+                if (!alreadySeenGlobal) {
                   matched.add(l);
-                  debugPrint('[NEW ID] ${l.id}');
+                  debugPrint('[NOTIFICATION ELIGIBLE] id=${l.id} true');
                   
+                  notificationAttemptedCount++;
                   bool success = await _notifications.notifyNewAd(l);
                   if (success) {
                     notificationsSent++;
                     debugPrint('[NOTIFICATION SENT] id=${l.id}');
                   }
                 } else {
-                  debugPrint('[DUPLICATE ID] ${l.id}');
+                  debugPrint('[NOTIFICATION ELIGIBLE] id=${l.id} false (Duplicate)');
                 }
               }
             }
+
+            debugPrint('[SUMMARY FOR FILTER ${config.name}]');
+            debugPrint('[TOTAL PARSED] count=${parsed.length}');
+            debugPrint('[TOTAL FILTER MATCHED] count=$filterMatchedCount');
+            debugPrint('[TOTAL NEW ELIGIBLE] count=${matched.length}');
+            debugPrint('[TOTAL NOTIFIED] count=$notificationsSent');
 
             newMatchesForThisCycle.addAll(matched);
             totalNewFound += matched.length;
@@ -209,13 +225,13 @@ class ScanEngine {
           if (!updatedListings.any((l) => l.id == newList.id)) {
             updatedListings.add(newList);
             idsToSave.add(newList.id);
-            debugPrint('[SAVED ID] ${newList.id}');
+            debugPrint('[SAVED ID TO SEEN DATABASE] ${newList.id}');
           }
         }
 
         await _storage.saveListings(updatedListings);
         await _storage.addSeenIds(idsToSave);
-        debugPrint('[BACKGROUND DB END]');
+        debugPrint('[BACKGROUND DB END] Saved ${idsToSave.length} new IDs');
       }
 
       if (successCount > 0) {
