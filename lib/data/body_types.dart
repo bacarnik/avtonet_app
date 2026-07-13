@@ -4,7 +4,7 @@ class BodyTypeOption {
   const BodyTypeOption({
     required this.code,
     required this.label,
-    required this.slug, // Added slug for mapping
+    required this.slug,
     required this.icon,
   });
 
@@ -14,8 +14,6 @@ class BodyTypeOption {
   final IconData icon;
 }
 
-/// OFFICIAL AVTO.NET CODES as requested by user.
-/// Note: These codes will be mapped via bodyTypeMap for URL generation.
 const List<BodyTypeOption> kBodyTypes = [
   BodyTypeOption(code: 0, label: 'Katerikoli', slug: 'any', icon: Icons.apps),
   BodyTypeOption(code: 11, label: 'Limuzina', slug: 'limuzina', icon: Icons.directions_car),

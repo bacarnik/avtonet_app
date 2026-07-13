@@ -219,9 +219,13 @@ class _SearchTabState extends State<SearchTab> {
     return DropdownButtonFormField<String>(
       value: c.selectedMake,
       isExpanded: true,
-      items: c.makes
-          .map((m) => DropdownMenuItem(value: m, child: Text(m.isEmpty ? 'Vse znamke' : m, overflow: TextOverflow.ellipsis)))
-          .toList(),
+      items: [
+        const DropdownMenuItem(value: '', child: Text('Vse znamke')),
+        ...c.allBrands.map((b) => DropdownMenuItem(
+              value: b.value,
+              child: Text(b.displayName, overflow: TextOverflow.ellipsis),
+            )),
+      ],
       onChanged: c.onMakeChanged,
     );
   }

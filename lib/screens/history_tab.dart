@@ -6,7 +6,6 @@ import '../models/car_listing.dart';
 import '../models/history_filter.dart';
 import '../data/body_types.dart';
 import '../data/filter_options.dart';
-import '../data/avtonet_catalog.dart';
 
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key, required this.controller});
@@ -134,7 +133,7 @@ class _HistoryTabState extends State<HistoryTab> {
                   isExpanded: true,
                   value: hf.model.isEmpty ? null : hf.model,
                   decoration: const InputDecoration(labelText: 'Model', isDense: true),
-                  items: ['', ...AvtonetCatalog.modelsForMake(hf.make)].map((m) => DropdownMenuItem<String>(
+                  items: ['', ...widget.controller.modelsForMake(hf.make)].map((m) => DropdownMenuItem<String>(
                     value: m, 
                     child: Text(m.isEmpty ? 'Vsi' : m, overflow: TextOverflow.ellipsis)
                   )).toList(),
@@ -235,7 +234,6 @@ class _HistoryTabState extends State<HistoryTab> {
             ],
             onChanged: (v) {
               if (v != null) {
-                debugPrint('[SORT] sortType=$v beforeCount=$filtered afterCount=$filtered');
                 _updateFilter(hf.copyWith(sortType: v));
               }
             },

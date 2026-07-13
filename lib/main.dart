@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'background/workmanager_entrypoint.dart';
 import 'controllers/app_controller.dart';
 import 'screens/home_screen.dart';
+import 'services/avtonet_catalog_service.dart';
 import 'services/avtonet_scraper_service.dart';
 import 'services/catchup_service.dart';
 import 'services/lifecycle_scheduler.dart';
@@ -20,6 +21,7 @@ Future<void> main() async {
   final notifications = NotificationService.instance;
   await notifications.initialize(requestPermission: true);
 
+  final catalog = AvtonetCatalogService();
   final scraper = AvtonetScraperService(log);
   // Ensure Scraper system is warmed up
   scraper.controller;
@@ -43,6 +45,7 @@ Future<void> main() async {
     storage: storage,
     log: log,
     scraper: scraper,
+    catalog: catalog,
     orchestrator: engine,
     catchUp: catchUp,
     lifecycleScheduler: lifecycleScheduler,

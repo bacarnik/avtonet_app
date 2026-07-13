@@ -13,7 +13,6 @@ class NotificationService {
   final _storage = StorageService();
 
   Future<void> initialize({bool requestPermission = false}) async {
-    debugPrint('[NOTIFICATION] initialize START (requestPermission=$requestPermission)');
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     
     const initSettings = InitializationSettings(android: android);
@@ -34,26 +33,20 @@ class NotificationService {
     final platform = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     if (platform != null) {
       if (requestPermission) {
-        final granted = await platform.requestNotificationsPermission();
-        debugPrint('[NOTIFICATION] PERMISSION REQUESTED: $granted');
+        await platform.requestNotificationsPermission();
       }
       
-      final channels = await platform.getNotificationChannels();
-      final exists = channels?.any((c) => c.id == 'avtonet_finder_channel') ?? false;
-      debugPrint('[NOTIFICATION] CHANNEL EXISTS: $exists');
+      await platform.getNotificationChannels();
     }
   }
 
   /// Fires an individual push notification for a single car record.
   /// Returns true if successfully displayed.
   Future<bool> notifyNewAd(CarListing ad) async {
-    debugPrint('[NOTIFICATION ATTEMPT] id=${ad.id} title=${ad.title}');
-    
     try {
       final platform = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       if (platform != null) {
         final notificationsEnabled = await platform.areNotificationsEnabled() ?? false;
-        debugPrint('[NOTIFICATION] permissionGranted=$notificationsEnabled');
         if (!notificationsEnabled) {
           debugPrint('[NOTIFICATION] WARNING: Notifications are disabled by user/system.');
           return false;
@@ -95,7 +88,6 @@ class NotificationService {
       );
       await _storage.recordNotificationSent(DateTime.now());
       debugPrint('[NOTIFICATION SHOWN] id=${ad.id}');
-      debugPrint('[WORKER NOTIFICATIONS SENT] 1');
       return true;
     } catch (e) {
       debugPrint('[NOTIFICATION] send failed id=${ad.id} error=$e');

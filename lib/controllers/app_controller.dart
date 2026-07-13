@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
-import '../data/avtonet_catalog.dart';
-import '../data/body_types.dart';
+import '../models/avtonet_catalog_models.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import '../models/history_filter.dart';
 import '../models/scheduler_event.dart';
+import '../data/body_types.dart';
+import '../services/avtonet_catalog_service.dart';
 import '../services/avtonet_scraper_service.dart';
 import '../services/catchup_service.dart';
 import '../services/lifecycle_scheduler.dart';
@@ -20,12 +21,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     required StorageService storage,
     required LogService log,
     required AvtonetScraperService scraper,
+    required AvtonetCatalogService catalog,
     required ScanEngine orchestrator,
     required CatchUpService catchUp,
     required LifecycleScheduler lifecycleScheduler,
   })  : _storage = storage,
         _log = log,
         _scraper = scraper,
+        _catalogService = catalog,
         _orchestrator = orchestrator,
         _catchUp = catchUp,
         _lifecycleScheduler = lifecycleScheduler;
@@ -35,6 +38,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final StorageService _storage;
   final LogService _log;
   final AvtonetScraperService _scraper;
+  final AvtonetCatalogService _catalogService;
   final ScanEngine _orchestrator;
   final CatchUpService _catchUp;
   final LifecycleScheduler _lifecycleScheduler;
@@ -46,6 +50,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String _scanLabel = '';
   Timer? _autoScanTimer;
   DateTime? _nextScanTime;
+  AvtonetCatalogData? _catalog;
 
   List<SearchConfig> savedSearches = [];
   List<CarListing> savedListings = [];
@@ -57,6 +62,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String? editingId;
   String selectedMake = '';
   String selectedModel = '';
+  String selectedModelSearchValue = '';
+  String? selectedModelId;
+  String? selectedSubModelGroup;
   List<int> selectedBodyTypes = [];
   String powerUnit = 'kW';
   int selectedFuel = 0;
@@ -74,9 +82,15 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String? mocMinText;
   String? mocMaxText;
 
-  List<String> get makes => AvtonetCatalog.makes;
-  List<String> get models => AvtonetCatalog.modelsForMake(selectedMake);
+  List<AvtonetBrand> get allBrands => _catalog?.brands ?? [];
+  List<String> get makes => allBrands.map((b) => b.displayName).toList();
+  List<AvtonetModel> get availableModels => _catalog?.modelsByBrand[selectedMake] ?? [];
+  List<String> get models => availableModels.map((m) => m.displayName).toList();
   bool get isModelDropdownEnabled => selectedMake.isNotEmpty;
+
+  List<String> modelsForMake(String makeValue) {
+    return _catalog?.modelsByBrand[makeValue]?.map((m) => m.displayName).toList() ?? [];
+  }
 
   bool get initialized => _initialized;
   bool get isScanning => _isScanning;
@@ -89,15 +103,15 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> initialize() async {
     if (_initialized) return;
-    debugPrint('[DB PROCESS] UI MAIN PROCESS');
+    debugPrint('[TRACE 22-A] AppController.initialize starting');
     WidgetsBinding.instance.addObserver(this);
     await _log.loadPersisted();
+    _catalog = await _catalogService.getCatalog();
     savedSearches = await _storage.loadSearches();
     savedListings = await _storage.loadListings();
     historyFilter = await _storage.loadHistoryFilter();
     schedulerHistory = await _storage.loadSchedulerHistory();
     workerDiagnostics = await _storage.getWorkerDiagnostics();
-    debugPrint('[HISTORY LOAD] fuel=${historyFilter.fuelCode} priceMin=${historyFilter.priceMin} priceMax=${historyFilter.priceMax}');
     
     _calculateNextScanTime();
     _autoScanTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
@@ -106,8 +120,20 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
     _initialized = true;
     notifyListeners();
-    // REMOVED: Automatic scan triggering on startup/timer removed per user requirement.
-    // Opening app must NEVER trigger a scan.
+    debugPrint('[APP INITIALIZED]');
+    
+    // Check if background worker missed a scan due to Cloudflare
+    debugPrint('[CHECKING PENDING SCANS] on initialization');
+    final needsScan = await _storage.consumePendingBackgroundScan();
+    debugPrint('[CHECK PENDING] value=$needsScan');
+    if (needsScan) {
+      debugPrint('[STARTING CATCHUP SCAN]');
+      debugPrint('[STARTING FOREGROUND WEBVIEW SCAN]');
+      runSequentialScan().then((_) {
+        debugPrint('[CATCHUP COMPLETE]');
+        debugPrint('[FOREGROUND SCAN FINISHED]');
+      });
+    }
   }
 
   void _calculateNextScanTime() {
@@ -146,24 +172,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _processStartupTasks() async {
-    final lastSuccess = await _storage.getLastSuccessfulScan();
-    if (lastSuccess != null) {
-      final now = DateTime.now();
-      int missed = _countMissedSlots(lastSuccess, now);
-      if (missed > 0) {
-        print('[AUTO SCAN] started=$now missedIntervals=$missed catchup=true');
-        final stopwatch = Stopwatch()..start();
-        // Removed offlineCatchUp and silentIfEmpty as they are no longer in runSequentialScan
-        await runSequentialScan();
-        stopwatch.stop();
-        print('[AUTO SCAN] finished=${DateTime.now()} duration=${stopwatch.elapsed.inSeconds}s');
-      }
-    }
-
-    final pending = await _storage.consumePendingBackgroundScan();
-    if (savedSearches.isNotEmpty && (await _catchUp.shouldRunCatchUp() || pending)) {
-      await runSequentialScan();
-    }
+    // REMOVED: Automatic catch-up scans on startup removed per user requirement.
+    // The background worker will handle finding all new ads since its last run
+    // because seen_vehicle_ids preserves state.
   }
 
   int _countMissedSlots(DateTime last, DateTime now) {
@@ -180,11 +191,35 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // REMOVED: No automatic scans on resume.
+    debugPrint('[TRACE 25] didChangeAppLifecycleState: state=$state initialized=$_initialized isScanning=$_isScanning');
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('[APP RESUMED]');
+      _checkPendingScan();
+    }
+  }
+
+  Future<void> _checkPendingScan() async {
+    debugPrint('[TRACE 26] _checkPendingScan starting');
+    final needsScan = await _storage.consumePendingBackgroundScan();
+    debugPrint('[TRACE 27] _checkPendingScan: consumePendingBackgroundScan value=$needsScan');
+    if (needsScan) {
+      if (!_isScanning) {
+        debugPrint('[STARTING CATCHUP SCAN]');
+        debugPrint('[STARTING FOREGROUND WEBVIEW SCAN]');
+        runSequentialScan().then((_) {
+          debugPrint('[CATCHUP COMPLETE]');
+          debugPrint('[FOREGROUND SCAN FINISHED]');
+        });
+      } else {
+        debugPrint('[TRACE 28] _checkPendingScan: already scanning, re-queuing pending scan');
+        await _storage.setPendingBackgroundScan(true);
+      }
+    }
   }
 
   void prepareNewSearch() {
     editingId = null; selectedMake = ''; selectedModel = '';
+    selectedModelSearchValue = ''; selectedModelId = null; selectedSubModelGroup = null;
     selectedBodyTypes = []; powerUnit = 'kW'; selectedFuel = 0;
     selectedTransmission = ''; draftSearchName = '';
     kmMinText = null; kmMaxText = null; letnikMinText = null;
@@ -195,6 +230,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   void loadSearchForEditing(SearchConfig config) {
     editingId = config.id; selectedMake = config.znamka; selectedModel = config.model;
+    selectedModelSearchValue = config.modelSearchValue;
+    selectedModelId = config.modelId;
+    selectedSubModelGroup = config.subModelGroup;
     selectedBodyTypes = config.oblika.split(',').map((e) => int.tryParse(e)).where((e) => e != null && e != 0).cast<int>().toList();
     powerUnit = config.powerUnit; selectedFuel = config.bencin; selectedTransmission = config.menjalnik;
     draftSearchName = config.name; kmMinText = config.kmMin?.toString(); kmMaxText = config.kmMax?.toString();
@@ -205,8 +243,28 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  void onMakeChanged(String? make) { selectedMake = make ?? ''; selectedModel = ''; notifyListeners(); }
-  void onModelChanged(String? model) { selectedModel = model ?? ''; notifyListeners(); }
+  void onMakeChanged(String? makeValue) { 
+    selectedMake = makeValue ?? '';
+    selectedModel = ''; 
+    selectedModelSearchValue = '';
+    selectedModelId = null;
+    selectedSubModelGroup = null;
+    notifyListeners(); 
+  }
+
+  void onModelChanged(String? modelName) { 
+    selectedModel = modelName ?? '';
+    final modelData = availableModels.firstWhere(
+      (m) => m.displayName == modelName,
+      orElse: () => AvtonetModel(displayName: '', searchValue: ''),
+    );
+    selectedModelSearchValue = modelData.searchValue;
+    selectedModelId = modelData.modelId;
+    selectedSubModelGroup = modelData.subModelGroup;
+
+    debugPrint('[UI SELECTION AUDIT] modelName="$selectedModel" modelId="$selectedModelId" searchValue="$selectedModelSearchValue"');
+    notifyListeners(); 
+  }
   void toggleBodyType(int code) {
     if (code == 0) selectedBodyTypes = [];
     else selectedBodyTypes.contains(code) ? selectedBodyTypes.remove(code) : selectedBodyTypes.add(code);
@@ -231,7 +289,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final name = draftSearchName.trim().isEmpty ? _defaultSearchName() : draftSearchName.trim();
     String oblikaCsv = selectedBodyTypes.isEmpty ? '0' : selectedBodyTypes.join(',');
     final config = SearchConfig(
-      id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), name: name, znamka: selectedMake, model: selectedModel,
+      id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), 
+      name: name, 
+      znamka: selectedMake, 
+      model: selectedModel,
+      modelSearchValue: selectedModelSearchValue,
+      modelId: selectedModelId,
+      subModelGroup: selectedSubModelGroup,
       oblika: oblikaCsv, kmMin: _parseInt(kmMinText), kmMax: _parseInt(kmMaxText), letnikMin: _parseInt(letnikMinText),
       letnikMax: _parseInt(letnikMaxText), cenaMin: _parseInt(cenaMinText), cenaMax: _parseInt(cenaMaxText),
       ccmMin: _parseInt(ccmMinText), ccmMax: _parseInt(ccmMaxText), mocMin: _parseInt(mocMinText), mocMax: _parseInt(mocMaxText),
@@ -252,6 +316,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   int? _parseInt(String? t) => (t == null || t.trim().isEmpty) ? null : int.tryParse(t.trim());
 
   Future<void> runSequentialScan({bool forceAll = false, String? singleId}) async {
+    debugPrint('[STARTING WEBVIEW SCAN] forceAll=$forceAll singleId=$singleId');
     if (_isScanning) {
       debugPrint('[SCAN] Already scanning. Ignoring request.');
       return;
@@ -274,29 +339,35 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     
     _isScanning = true; _scanTotal = configsToPass.length; _scanIndex = 0; notifyListeners();
     
-    final result = await _orchestrator.scan(
-      searches: savedSearches, 
-      currentListings: savedListings,
-      onProgress: (idx, total, lbl, st) { 
-        _scanIndex = idx; 
-        _scanTotal = total; 
-        _scanLabel = lbl; 
-        notifyListeners(); 
-      },
-      isAuto: false,
-      forceAll: forceAll,
-      singleId: singleId,
-    );
-    
-    if (result.successCount > 0) {
-      await _storage.setLastScanNewCount(result.newListings);
-      debugPrint('[MANUAL SCAN] results=${result.newListings}');
-    } else if (result.failCount > 0) {
-      await _storage.setLastFailedScan(DateTime.now(), 'Scan failed');
-    }
+    try {
+      final result = await _orchestrator.scan(
+        searches: savedSearches, 
+        currentListings: savedListings,
+        onProgress: (idx, total, lbl, st) { 
+          _scanIndex = idx; 
+          _scanTotal = total; 
+          _scanLabel = lbl; 
+          notifyListeners(); 
+        },
+        isAuto: false,
+        forceAll: forceAll,
+        singleId: singleId,
+      );
+      debugPrint('[WEBVIEW SCAN COMPLETE] success=${result.successCount} new=${result.newListings}');
+      
+      if (result.successCount > 0) {
+        await _storage.setLastScanNewCount(result.newListings);
+      } else if (result.failCount > 0) {
+        await _storage.setLastFailedScan(DateTime.now(), 'Scan failed');
+      }
 
-    savedSearches = result.updatedConfigs; await _storage.saveSearches(savedSearches);
-    savedListings = await _storage.loadListings(); _isScanning = false; notifyListeners();
+      savedSearches = result.updatedConfigs; 
+      await _storage.saveSearches(savedSearches);
+      savedListings = await _storage.loadListings();
+    } finally {
+      _isScanning = false; 
+      notifyListeners();
+    }
   }
 
   void cancelScan() {
@@ -352,15 +423,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final oldFilter = historyFilter;
     historyFilter = newFilter;
     await _storage.saveHistoryFilter(historyFilter);
-    debugPrint('[HISTORY SAVE] fuel=${historyFilter.fuelCode} priceMin=${historyFilter.priceMin} priceMax=${historyFilter.priceMax}');
-    _compareHistoryFilters(oldFilter, historyFilter);
     notifyListeners();
   }
 
   Future<void> resetHistoryFilter() async {
     historyFilter = const HistoryFilter();
     await _storage.saveHistoryFilter(historyFilter);
-    debugPrint('[RESET FILTERS] fuel=0 priceMin=null priceMax=null');
     notifyListeners();
   }
 
@@ -380,8 +448,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   String _defaultSearchName() {
     final make = selectedMake.isEmpty ? 'Vse znamke' : selectedMake;
-    String bodyLabel = selectedBodyTypes.isEmpty ? 'Vse oblike' : selectedBodyTypes.map((c) => kBodyTypes.firstWhere((b) => b.code == c, orElse: () => kBodyTypes.first).label).join(', ');
-    return '$make · $bodyLabel';
+    return '$make ${selectedModel.isEmpty ? "" : selectedModel}';
   }
 
   String bodyTypeLabel(String csv) {

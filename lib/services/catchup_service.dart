@@ -49,7 +49,8 @@ class CatchUpService {
       searches: searches,
       currentListings: listings,
       onProgress: onProgress,
-      isAuto: false, // CatchUp is typically triggered when app opens, so it's "Semi-Manual"
+      isAuto: false, 
+      ownerOverride: 'CATCHUP',
     );
   }
 }
