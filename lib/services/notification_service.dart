@@ -1,8 +1,8 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/car_listing.dart';
 import 'storage_service.dart';
+import '../utils/logger.dart';
 
 /// REFACTORED: Individual Listing Notification Architecture.
 class NotificationService {
@@ -14,7 +14,6 @@ class NotificationService {
 
   Future<void> initialize({bool requestPermission = false}) async {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-    
     const initSettings = InitializationSettings(android: android);
     
     await _plugin.initialize(
@@ -35,7 +34,6 @@ class NotificationService {
       if (requestPermission) {
         await platform.requestNotificationsPermission();
       }
-      
       await platform.getNotificationChannels();
     }
   }
@@ -48,17 +46,12 @@ class NotificationService {
       if (platform != null) {
         final notificationsEnabled = await platform.areNotificationsEnabled() ?? false;
         if (!notificationsEnabled) {
-          debugPrint('[NOTIFICATION] WARNING: Notifications are disabled by user/system.');
           return false;
         }
       }
 
       final String title = ad.title; 
-      
-      // REQUIREMENT: If mileage missing, display "/"
       final String mileage = (ad.mileage.isEmpty || ad.mileage == '0 km') ? '/' : ad.mileage;
-      
-      // Construct the formatted body: €4,900 • 2013 • 2.0 CDI • 240000 km
       final String body = '${ad.price} • ${ad.year} • ${ad.fuel} • $mileage';
 
       final bigStyle = BigTextStyleInformation(
@@ -78,7 +71,6 @@ class NotificationService {
         ticker: 'ticker',
       );
 
-      // Pass the listing link as payload so the click action can open it.
       await _plugin.show(
         ad.id.hashCode,
         title,
@@ -87,10 +79,9 @@ class NotificationService {
         payload: ad.link,
       );
       await _storage.recordNotificationSent(DateTime.now());
-      debugPrint('[NOTIFICATION SHOWN] id=${ad.id}');
       return true;
-    } catch (e) {
-      debugPrint('[NOTIFICATION] send failed id=${ad.id} error=$e');
+    } catch (e, stack) {
+      AppLogger.error('[NOTIFICATION]', 'Send failed id=${ad.id}', e, stack);
       return false;
     }
   }

@@ -11,6 +11,7 @@ import '../parsers/avtonet_html_parser.dart';
 import '../utils/url_builder.dart';
 import 'log_service.dart';
 import 'webview_stealth_config.dart';
+import '../utils/logger.dart';
 
 enum ScrapeStatus {
   idle,
@@ -57,13 +58,9 @@ class AvtonetScraperService {
   bool _ready = false;
   bool get isReady => _ready;
   Completer<void>? _pageLoadCompleter;
-  
-  // Persistent Cookie Storage
-  final List<Cookie> _cookieJar = [];
 
   void _initController() {
     if (kIsWeb) return;
-    debugPrint('[WEBVIEW CREATED]');
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(WebviewStealthConfig.userAgent)
@@ -73,7 +70,7 @@ class AvtonetScraperService {
             _pageLoadCompleter?.complete();
           },
           onWebResourceError: (error) {
-            debugPrint('[WEBVIEW ERROR] ${error.description}');
+            AppLogger.error('[SCRAPER]', 'WebView resource error: ${error.description}');
           },
         ),
       );
@@ -88,20 +85,14 @@ class AvtonetScraperService {
     await cookieManager.clearCookies();
   }
 
-  /// Simplified Fetch: Prefer WebView for stability as requested.
   Future<String> _fetch(String url, {required String method, Duration? timeout}) async {
-    // Attempt WebView fetch primarily for stability against 403.
-    // In background mode, this ensures session/cookies are used even if fallback is needed.
     if (useWebView && _ready) {
       try {
-        final html = await _fetchWithWebView(url);
-        return html;
+        return await _fetchWithWebView(url);
       } catch (e) {
-        debugPrint('[SCRAPER] WebView fetch failed, falling back to HttpClient: $e');
+        AppLogger.warn('[SCRAPER]', 'WebView fetch failed, falling back to HttpClient');
       }
     }
-    
-    // Fallback or Direct fetch using simple HttpClient
     return await _fetchSimple(url, timeout: timeout);
   }
 
@@ -110,37 +101,26 @@ class AvtonetScraperService {
     final client = HttpClient();
     client.connectionTimeout = effectiveTimeout;
     
-    debugPrint('[HTTP CLIENT] Fetching: $url');
     try {
       final request = await client.getUrl(Uri.parse(url));
       WebviewStealthConfig.navigationHeaders(referer: 'https://www.avto.net/').forEach((k, v) => request.headers.set(k, v));
       
       final response = await request.close().timeout(effectiveTimeout);
-      
-      final contentType = response.headers.contentType?.toString() ?? 'unknown';
       final statusCode = response.statusCode;
-      
-      debugPrint('[HTTP CLIENT] Status: $statusCode');
-      debugPrint('[HTTP CLIENT] Content-Type: $contentType');
 
       if (statusCode == 301 || statusCode == 302) {
         final location = response.headers.value('location');
-        debugPrint('[HTTP CLIENT] Redirect detected to: $location');
+        AppLogger.warn('[SCRAPER]', 'HTTP Redirect to: $location');
       }
 
       final html = await response.transform(utf8.decoder).join();
-      debugPrint('[HTTP CLIENT] Body Length: ${html.length}');
-      debugPrint('[HTTP CLIENT] Body Start (300 chars): ${html.substring(0, html.length > 300 ? 300 : html.length)}');
 
       if (AvtonetHtmlParser.isCloudflareChallenge(html)) {
-        debugPrint('[HTTP CLIENT] CLOUDFLARE CHALLENGE DETECTED IN BODY');
         throw CloudflareBlockedException('Cloudflare Challenge Detected');
       }
 
       if (statusCode != 200) {
-        debugPrint('[HTTP CLIENT] Non-200 status code: $statusCode');
         if (statusCode == 403) {
-           debugPrint('[HTTP CLIENT] 403 FORBIDDEN - Likely Cloudflare or IP block');
            throw CloudflareBlockedException('HTTP 403 Forbidden (Cloudflare)');
         }
         throw Exception('HTTP $statusCode');
@@ -149,7 +129,6 @@ class AvtonetScraperService {
       client.close();
       return html;
     } catch (e) {
-      debugPrint('[HTTP CLIENT ERROR] $e');
       client.close();
       rethrow;
     }
@@ -157,16 +136,13 @@ class AvtonetScraperService {
 
   Future<String> _fetchWithWebView(String url) async {
     if (!_ready) throw Exception('WebView not initialized');
-    
     _pageLoadCompleter = Completer<void>();
     
     await controller.loadRequest(Uri.parse(url), headers: WebviewStealthConfig.navigationHeaders(referer: 'https://www.avto.net/'));
     
     try {
       await _pageLoadCompleter!.future.timeout(WebviewStealthConfig.pageLoadTimeout);
-      debugPrint('[WEBVIEW PAGE LOADED] url=$url');
       
-      // WAIT CONDITION: Wait for listing containers to appear
       bool containersFound = false;
       for (int i = 0; i < 10; i++) {
         final check = await controller.runJavaScriptReturningResult(
@@ -183,7 +159,6 @@ class AvtonetScraperService {
       String decodedHtml = _decodeWebViewHtml(html);
       
       if (AvtonetHtmlParser.isCloudflareChallenge(decodedHtml)) {
-        debugPrint('[CLOUDFLARE DETECTED]');
         throw Exception('Cloudflare Challenge');
       }
 
@@ -208,10 +183,6 @@ class AvtonetScraperService {
   }
 
   Future<ScrapeResult> scrapeSearchUrl(SearchConfig config, {required String method, List<String> seenIds = const []}) async {
-    if (useWebView) {
-      debugPrint('[WEBVIEW SCRAPE START] configId=${config.id}');
-    }
-    debugPrint('[TRACE 10-A] scrapeSearchUrl starting. method=$method configId=${config.id} useWebView=$useWebView');
     final List<CarListing> allNewListings = [];
     int totalChecked = 0;
     int totalPages = 0;
@@ -223,10 +194,9 @@ class AvtonetScraperService {
 
     try {
       final String baseUrl = buildAvtonetResultsUrl(config);
-      debugPrint('[TRACE 10-B] scrapeSearchUrl: baseUrl generated: $baseUrl');
 
       pageLoop:
-      for (int page = 1; page <= 50; page++) { // Hard cap at 50 to prevent infinite loops
+      for (int page = 1; page <= 50; page++) {
         String pageUrl = baseUrl;
         if (pageUrl.contains('stran=')) {
           pageUrl = pageUrl.replaceFirst(RegExp(r'stran=\d+'), 'stran=$page');
@@ -237,19 +207,16 @@ class AvtonetScraperService {
         String? html;
         try {
           if (page == 1) {
-            // Special handling for page 1: retry up to 3 times ONLY for non-Cloudflare errors
             for (int retry = 0; retry <= 3; retry++) {
               try {
-                debugPrint('[TRACE 10-C] scrapeSearchUrl: fetching page $page, attempt $retry');
                 html = await _fetch(pageUrl, method: method);
                 consecutivePageFailures = 0;
                 break;
               } on CloudflareBlockedException {
-                debugPrint('[TRACE 10-D] scrapeSearchUrl: CloudflareBlockedException caught during fetch');
                 rethrow;
               } catch (e) {
                 if (retry == 3) throw e;
-                debugPrint('[SCRAPER] Page 1 retry $retry due to error: $e');
+                AppLogger.warn('[SCRAPER]', 'Page 1 retry $retry/3 due to error: $e');
                 await Future.delayed(const Duration(seconds: 2));
               }
             }
@@ -258,10 +225,8 @@ class AvtonetScraperService {
             consecutivePageFailures = 0;
           }
         } on CloudflareBlockedException {
-          debugPrint('[TRACE 10-F] scrapeSearchUrl: returning CloudflareBlocked failure');
           return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
         } catch (e) {
-          debugPrint('[TRACE 10-G] scrapeSearchUrl: caught exception during fetch: $e');
           consecutivePageFailures++;
           final errStr = e.toString().toLowerCase();
           
@@ -280,10 +245,7 @@ class AvtonetScraperService {
           continue pageLoop;
         }
 
-        if (html == null) {
-          debugPrint('[TRACE 10-H] scrapeSearchUrl: html is null for page $page');
-          continue;
-        }
+        if (html == null) continue;
 
         final List<CarListing> pageListings = await compute(_parseListingsInBackground, {
           'html': html,
@@ -292,16 +254,14 @@ class AvtonetScraperService {
         });
 
         final pagination = await compute(_parsePaginationInBackground, html);
-        // debugPrint('[PAGINATION] page=$page currentPage=${pagination.currentPage} totalPages=${pagination.totalPages} hasNext=${pagination.hasNext}');
         
         if (pageListings.isEmpty) {
-          debugPrint('[TRACE 10-I] scrapeSearchUrl: pageListings empty for page $page');
           stopReason = 'Zero listings on page $page';
           break pageLoop;
         }
 
         int consecutiveSeen = 0;
-        const int earlyStopThreshold = 15; // Stop scan after 15 consecutive already known ads
+        const int earlyStopThreshold = 15;
 
         for (var listing in pageListings) {
           if (!seenInThisScan.add(listing.id)) continue;
@@ -311,15 +271,13 @@ class AvtonetScraperService {
             allNewListings.add(listing);
             consecutiveSeen = 0;
           } else {
-            // Only increment consecutive counter if NOT a top offer, 
-            // because top offers can appear anywhere regardless of age.
             if (!listing.isTopOffer) {
               consecutiveSeen++;
             }
           }
 
           if (consecutiveSeen >= earlyStopThreshold) {
-            stopReason = 'Early stop: Found $consecutiveSeen consecutive known ads';
+            stopReason = 'Early stop (known ads)';
             break pageLoop;
           }
         }
@@ -327,68 +285,28 @@ class AvtonetScraperService {
         totalPages++;
 
         if (pageListings.length < 48) {
-          stopReason = 'Last page detected (count=${pageListings.length} < 48)';
+          stopReason = 'Last page reached';
           break pageLoop;
         }
 
         if (!pagination.hasNext) {
-          stopReason = 'End of results reached (no next page)';
+          stopReason = 'No next page';
           break pageLoop;
         }
 
-        // Safety cap: Only use totalPages if it's greater than 1 and we've reached it.
-        // If totalPages is 1 but hasNext is true, we trust hasNext (parser error).
         if (pagination.totalPages > 1 && page >= pagination.totalPages) {
-          stopReason = 'Reached pagination limit (${pagination.totalPages})';
+          stopReason = 'Reached pagination limit';
           break pageLoop;
         }
       }
 
-      debugPrint('[PAGINATION SUMMARY]');
-      debugPrint('pagesVisited=$totalPages');
-      debugPrint('totalListings=$totalChecked');
-      debugPrint('stopReason=$stopReason');
-      
-      if (useWebView) {
-        debugPrint('[WEBVIEW SCRAPE FINISHED] configId=${config.id}');
-      }
+      return ScrapeResult.success(allNewListings, pages: totalPages, totalFound: totalChecked);
 
-      final successResult = ScrapeResult.success(allNewListings, pages: totalPages, totalFound: totalChecked);
-      debugPrint('[TRACE 10-J] scrapeSearchUrl success. totalFound=$totalChecked newListings=${allNewListings.length}');
-      return successResult;
-
-    } catch (e) {
-      debugPrint('[TRACE 10-K] scrapeSearchUrl outer catch error: $e');
-      debugPrint('[SCAN ERROR] $e');
+    } catch (e, stack) {
+      AppLogger.error('[SCRAPER]', 'Scrape exception for config ${config.name}', e, stack);
       return ScrapeResult.failure(e.toString());
     }
   }
-
-/*
-  String buildAvtonetResultsUrl_LOCAL(SearchConfig config) {
-    const String baseSearchUrl = 'https://www.avto.net/Ads/results.asp?SID=3&KATEGORIJA=100';
-    debugPrint('[BASE SEARCH URL] $baseSearchUrl');
-
-    final sb = StringBuffer('$baseSearchUrl&znamka=${config.znamka}');
-    if (config.model.isNotEmpty) sb.write('&model=${config.model}');
-    if (config.oblika != '0') sb.write('&oblika=${config.oblika}');
-    if (config.letnikMin != null) sb.write('&letnikMin=${config.letnikMin}');
-    if (config.letnikMax != null) sb.write('&letnikMax=${config.letnikMax}');
-    if (config.cenaMin != null) sb.write('&cenaMin=${config.cenaMin}');
-    if (config.cenaMax != null) sb.write('&cenaMax=${config.cenaMax}');
-    if (config.bencin != 0) sb.write('&bencin=${config.bencin}');
-    if (config.menjalnik.isNotEmpty) sb.write('&menjalnik=${config.menjalnik}');
-    if (config.kmMin != null) sb.write('&kmMin=${config.kmMin}');
-    if (config.kmMax != null) sb.write('&kmMax=${config.kmMax}');
-    if (config.mocMin != null) sb.write('&mocMin=${config.mocMin}');
-    if (config.mocMax != null) sb.write('&mocMax=${config.mocMax}');
-    
-    sb.write('&SEARCH_ORDER=2&stran=1');
-    final String url = sb.toString();
-    debugPrint('[GENERATED URL] $url');
-    return url;
-  }
-*/
 }
 
 /// Helper for compute()

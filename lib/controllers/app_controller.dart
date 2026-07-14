@@ -15,6 +15,7 @@ import '../services/log_service.dart';
 import '../services/scan_orchestrator.dart';
 import '../services/storage_service.dart';
 import '../background/workmanager_entrypoint.dart';
+import '../utils/logger.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
@@ -101,10 +102,17 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AvtonetScraperService get scraper => _scraper;
   DateTime? get nextScanTime => _nextScanTime;
 
+  int? _lastTriggerMinute;
+
   Future<void> initialize() async {
-    if (_initialized) return;
-    debugPrint('[TRACE 22-A] AppController.initialize starting');
+    WidgetsBinding.instance.removeObserver(this);
     WidgetsBinding.instance.addObserver(this);
+    
+    if (_initialized) {
+      _lifecycleScheduler.start();
+      return;
+    }
+
     await _log.loadPersisted();
     _catalog = await _catalogService.getCatalog();
     savedSearches = await _storage.loadSearches();
@@ -114,40 +122,46 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     workerDiagnostics = await _storage.getWorkerDiagnostics();
     
     _calculateNextScanTime();
-    _autoScanTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      _calculateNextScanTime();
+    
+    _lifecycleScheduler.bind(() async {
+      _onSchedulerTick();
     });
+    _lifecycleScheduler.start();
 
     _initialized = true;
     notifyListeners();
-    debugPrint('[APP INITIALIZED]');
     
-    // Check if background worker missed a scan due to Cloudflare
-    debugPrint('[CHECKING PENDING SCANS] on initialization');
     final needsScan = await _storage.consumePendingBackgroundScan();
-    debugPrint('[CHECK PENDING] value=$needsScan');
     if (needsScan) {
-      debugPrint('[STARTING CATCHUP SCAN]');
-      debugPrint('[STARTING FOREGROUND WEBVIEW SCAN]');
-      runSequentialScan().then((_) {
-        debugPrint('[CATCHUP COMPLETE]');
-        debugPrint('[FOREGROUND SCAN FINISHED]');
-      });
+      AppLogger.info('[PENDING]', 'Starting catch-up scan');
+      runSequentialScan();
+    }
+  }
+
+  void _onSchedulerTick() {
+    final now = DateTime.now();
+    _calculateNextScanTime();
+
+    // Only trigger if in active window 08:00-22:00
+    if (now.hour < 8 || now.hour >= 22) return;
+
+    // Trigger every 15 minutes (00, 15, 30, 45)
+    if (now.minute % 15 == 0 && now.minute != _lastTriggerMinute) {
+      _lastTriggerMinute = now.minute;
+      AppLogger.info('[SCHEDULER]', 'Triggering scan');
+      runSequentialScan();
     }
   }
 
   void _calculateNextScanTime() {
     final now = DateTime.now();
     
-    // Strict cutoff: No scans after 22:00
     if (now.hour >= 22) {
-      debugPrint('[SCHEDULE BLOCKED AFTER 22:00]');
       _nextScanTime = DateTime(now.year, now.month, now.day + 1, 8, 0);
       notifyListeners();
       return;
     }
 
-    // Find next 15-min mark: 00, 15, 30, 45
     int minute = now.minute;
     int nextMinute = ((minute ~/ 15) + 1) * 15;
     
@@ -158,60 +172,33 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       next = DateTime(now.year, now.month, now.day, now.hour, nextMinute);
     }
     
-    // Apply window rules (08:00 - 21:45 is the last start)
     if (next.hour < 8) {
       next = DateTime(next.year, next.month, next.day, 8, 0);
     } else if (next.hour >= 22) {
-      debugPrint('[SCHEDULE BLOCKED AFTER 22:00]');
       next = DateTime(next.year, next.month, next.day + 1, 8, 0);
     }
     
-    _nextScanTime = next;
-    debugPrint('[SCHEDULER] now=$now next=$_nextScanTime activeWindow=08:00-22:00 interval=15m');
-    notifyListeners();
-  }
-
-  Future<void> _processStartupTasks() async {
-    // REMOVED: Automatic catch-up scans on startup removed per user requirement.
-    // The background worker will handle finding all new ads since its last run
-    // because seen_vehicle_ids preserves state.
-  }
-
-  int _countMissedSlots(DateTime last, DateTime now) {
-    int count = 0;
-    DateTime current = last.add(const Duration(minutes: 15));
-    while (current.isBefore(now)) {
-      if (current.hour >= 8 && current.hour < 22) {
-        count++;
-      }
-      current = current.add(const Duration(minutes: 15));
+    if (_nextScanTime != next) {
+      _nextScanTime = next;
+      AppLogger.info('[SCHEDULER]', 'Next scan ${next.hour}:${next.minute.toString().padLeft(2, '0')}');
     }
-    return count;
+    notifyListeners();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    debugPrint('[TRACE 25] didChangeAppLifecycleState: state=$state initialized=$_initialized isScanning=$_isScanning');
     if (state == AppLifecycleState.resumed) {
-      debugPrint('[APP RESUMED]');
       _checkPendingScan();
     }
   }
 
   Future<void> _checkPendingScan() async {
-    debugPrint('[TRACE 26] _checkPendingScan starting');
     final needsScan = await _storage.consumePendingBackgroundScan();
-    debugPrint('[TRACE 27] _checkPendingScan: consumePendingBackgroundScan value=$needsScan');
     if (needsScan) {
       if (!_isScanning) {
-        debugPrint('[STARTING CATCHUP SCAN]');
-        debugPrint('[STARTING FOREGROUND WEBVIEW SCAN]');
-        runSequentialScan().then((_) {
-          debugPrint('[CATCHUP COMPLETE]');
-          debugPrint('[FOREGROUND SCAN FINISHED]');
-        });
+        AppLogger.info('[PENDING]', 'Starting catch-up scan');
+        runSequentialScan();
       } else {
-        debugPrint('[TRACE 28] _checkPendingScan: already scanning, re-queuing pending scan');
         await _storage.setPendingBackgroundScan(true);
       }
     }
@@ -261,8 +248,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     selectedModelSearchValue = modelData.searchValue;
     selectedModelId = modelData.modelId;
     selectedSubModelGroup = modelData.subModelGroup;
-
-    debugPrint('[UI SELECTION AUDIT] modelName="$selectedModel" modelId="$selectedModelId" searchValue="$selectedModelSearchValue"');
     notifyListeners(); 
   }
   void toggleBodyType(int code) {
@@ -316,13 +301,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   int? _parseInt(String? t) => (t == null || t.trim().isEmpty) ? null : int.tryParse(t.trim());
 
   Future<void> runSequentialScan({bool forceAll = false, String? singleId}) async {
-    debugPrint('[STARTING WEBVIEW SCAN] forceAll=$forceAll singleId=$singleId');
-    if (_isScanning) {
-      debugPrint('[SCAN] Already scanning. Ignoring request.');
-      return;
-    }
+    if (_isScanning) return;
     
-    // Identification of items to scan
     List<SearchConfig> configsToPass;
     if (singleId != null) {
       configsToPass = savedSearches.where((s) => s.id == singleId).toList();
@@ -332,10 +312,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       configsToPass = savedSearches.where((s) => s.isEnabled).toList();
     }
     
-    if (configsToPass.isEmpty) {
-      debugPrint('[SCAN] No filters to scan.');
-      return;
-    }
+    if (configsToPass.isEmpty) return;
     
     _isScanning = true; _scanTotal = configsToPass.length; _scanIndex = 0; notifyListeners();
     
@@ -353,7 +330,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         forceAll: forceAll,
         singleId: singleId,
       );
-      debugPrint('[WEBVIEW SCAN COMPLETE] success=${result.successCount} new=${result.newListings}');
       
       if (result.successCount > 0) {
         await _storage.setLastScanNewCount(result.newListings);
@@ -405,7 +381,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> runWorkerNow() async {
     await runTestBackgroundTask();
-    // Give it a moment then refresh
     Future.delayed(const Duration(seconds: 5), () => refreshDiagnostics());
   }
 
@@ -420,7 +395,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> updateHistoryFilter(HistoryFilter newFilter) async {
-    final oldFilter = historyFilter;
     historyFilter = newFilter;
     await _storage.saveHistoryFilter(historyFilter);
     notifyListeners();
@@ -430,20 +404,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     historyFilter = const HistoryFilter();
     await _storage.saveHistoryFilter(historyFilter);
     notifyListeners();
-  }
-
-  void _compareHistoryFilters(HistoryFilter old, HistoryFilter updated) {
-    final lostFields = <String>[];
-    if (old.priceMin != null && updated.priceMin == null) lostFields.add('priceMin');
-    if (old.priceMax != null && updated.priceMax == null) lostFields.add('priceMax');
-    if (old.fuelCode != 0 && updated.fuelCode == 0) lostFields.add('fuelCode');
-    if (old.make.isNotEmpty && updated.make.isEmpty) lostFields.add('make');
-    
-    if (lostFields.isNotEmpty) {
-      debugPrint('[COMPARISON WARNING] Lost/Changed fields: ${lostFields.join(', ')}');
-    } else {
-      debugPrint('[COMPARISON] No critical fields lost during save/load cycle.');
-    }
   }
 
   String _defaultSearchName() {
@@ -456,5 +416,5 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return csv.split(',').map((e) => int.tryParse(e)).where((e) => e != null).map((c) => kBodyTypes.firstWhere((b) => b.code == c, orElse: () => kBodyTypes.first).label).join(', ');
   }
 
-  @override void dispose() { _autoScanTimer?.cancel(); WidgetsBinding.instance.removeObserver(this); _lifecycleScheduler.dispose(); super.dispose(); }
+  @override void dispose() { WidgetsBinding.instance.removeObserver(this); _lifecycleScheduler.dispose(); super.dispose(); }
 }

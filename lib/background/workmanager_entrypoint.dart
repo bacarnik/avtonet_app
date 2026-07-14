@@ -1,5 +1,4 @@
 import 'package:workmanager/workmanager.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import '../services/storage_service.dart';
@@ -7,6 +6,7 @@ import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/avtonet_scraper_service.dart';
 import '../services/scan_orchestrator.dart';
+import '../utils/logger.dart';
 
 const String kPeriodicScanTask = 'avtonet_periodic_scan_v3';
 
@@ -14,7 +14,8 @@ const String kPeriodicScanTask = 'avtonet_periodic_scan_v3';
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
     WidgetsFlutterBinding.ensureInitialized();
-    debugPrint('[TRACE 1] callbackDispatcher starting task: $taskName');
+    final logService = LogService();
+    AppLogger.init(logService);
     
     final storage = StorageService();
     final now = DateTime.now();
@@ -27,9 +28,7 @@ void callbackDispatcher() {
     int failedCount = 0;
 
     try {
-      // 1. NIGHT PAUSE (22:00 - 08:00)
       if (now.hour < 8 || now.hour >= 22) {
-        debugPrint('[TRACE 2] callbackDispatcher: Night pause active');
         exitReason = 'NIGHT_PAUSE';
         await storage.recordWorkerFinish(now, true, resultStatus: exitReason);
         return true;
@@ -38,17 +37,13 @@ void callbackDispatcher() {
       final searches = await storage.loadSearches();
       final activeFilters = searches.where((s) => s.isEnabled).toList();
       activeCount = activeFilters.length;
-      debugPrint('[TRACE 3] callbackDispatcher: activeFilters count=$activeCount');
       
-      // 2. NO FILTERS
       if (activeFilters.isEmpty) {
-        debugPrint('[TRACE 4] callbackDispatcher: No active filters');
         exitReason = 'NO_FILTERS';
         await storage.recordWorkerFinish(now, true, resultStatus: 'NO_FILTERS');
         return true;
       }
 
-      final logService = LogService();
       final notificationService = NotificationService.instance;
       await notificationService.initialize();
       
@@ -62,7 +57,6 @@ void callbackDispatcher() {
 
       final currentListings = await storage.loadListings();
       
-      debugPrint('[TRACE 5] callbackDispatcher: calling engine.scan');
       final result = await engine.scan(
         searches: searches,
         currentListings: currentListings,
@@ -70,35 +64,25 @@ void callbackDispatcher() {
         isAuto: true,
         ownerOverride: 'WORKER',
       );
-      debugPrint('[TRACE 12] callbackDispatcher: engine.scan returned. result.ok=${result.ok} result.error="${result.error}" successCount=${result.successCount} failCount=${result.failCount}');
 
       successCount = result.successCount;
       failedCount = result.failCount;
 
-      // 3. EVALUATE RESULT
       exitReason = 'SUCCESS';
       if (!result.ok) {
         final err = result.error.toLowerCase();
-        debugPrint('[TRACE 13] callbackDispatcher: result not ok. error context: "$err"');
         if (err.contains('ključavnica')) {
-          debugPrint('[TRACE 14] callbackDispatcher: Lock active detected');
           exitReason = 'LOCK_ACTIVE';
         } else if (err.contains('cloudflare') || err.contains('403')) {
-          debugPrint('[TRACE 15] callbackDispatcher: Cloudflare/403 detected. Calling setPendingBackgroundScan(true)');
           exitReason = 'CLOUDFLARE';
           await storage.setPendingBackgroundScan(true);
         } else if (err.contains('webview') && err.contains('timeout')) {
-          debugPrint('[TRACE 16] callbackDispatcher: Webview timeout detected');
           exitReason = 'WEBVIEW_TIMEOUT';
         } else if (err.contains('timeout') || err.contains('network')) {
-          debugPrint('[TRACE 17] callbackDispatcher: Network timeout detected');
           exitReason = 'HTTP_TIMEOUT';
         } else {
-          debugPrint('[TRACE 18] callbackDispatcher: Generic error branch');
           exitReason = 'ERROR';
         }
-      } else {
-        debugPrint('[TRACE 19] callbackDispatcher: result ok branch');
       }
 
       await storage.recordWorkerFinish(
@@ -116,13 +100,12 @@ void callbackDispatcher() {
         successFilters: successCount,
         failedFilters: failedCount,
         usedHttpClient: true,
-        usedWebView: false,
+        usedWebView: true,
       );
 
-      debugPrint('[TRACE 20] callbackDispatcher task finished successfully with exitReason=$exitReason');
       return true;
-    } catch (e) {
-      debugPrint('[TRACE 21] callbackDispatcher caught exception: $e');
+    } catch (e, stack) {
+      AppLogger.error('[BACKGROUND]', 'Worker exception', e, stack);
       await storage.recordWorkerFinish(
         DateTime.now(), 
         false, 
@@ -151,9 +134,8 @@ Future<void> registerBackgroundTasks() async {
     );
     
     await storage.recordWorkerRegistration(DateTime.now());
-    debugPrint('[WORKER REGISTERED]');
-  } catch (e) {
-    debugPrint('[WORKER FAILURE] Registration failed: $e');
+  } catch (e, stack) {
+    AppLogger.error('[BACKGROUND]', 'Workmanager registration failed', e, stack);
   }
 }
 

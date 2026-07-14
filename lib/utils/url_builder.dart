@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import '../models/search_config.dart';
 import '../data/filter_options.dart';
 
@@ -19,8 +18,6 @@ int? _normalizePower(int? value, String unit) {
 
 /// REFACTORED: Uses exact values from Avto.net catalog.
 String buildAvtonetResultsUrl(SearchConfig config) {
-  debugPrint('[URL BUILDER INPUT] modelId="${config.modelId}" modelSearchValue="${config.modelSearchValue}" subModelGroup="${config.subModelGroup}"');
-  
   final String eq7 = _eq7ForTransmission(config.menjalnik) ?? '1110100120';
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
@@ -59,7 +56,6 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'stran': '1',
   };
 
-  // If SUBmodelsearch is present, model parameter must be empty (standard Avto.net group search)
   if (params['SUBmodelsearch']!.isNotEmpty) {
     params['model'] = '';
   }
@@ -70,9 +66,7 @@ String buildAvtonetResultsUrl(SearchConfig config) {
   if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
   if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
 
-  final url = _buildFromMap(params);
-  debugPrint('[FINAL URL] $url');
-  return url;
+  return _buildFromMap(params);
 }
 
 /// Builds a minimal URL for diagnostics.
@@ -105,13 +99,9 @@ String buildMinimalAvtonetUrl(SearchConfig config) {
 }
 
 String _buildFromMap(Map<String, String> params) {
-  // Standard Uri construction in Dart removes '=' for empty values.
-  // Manual construction preserves them.
   final queryString = params.entries
       .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
       .join('&');
   
-  final url = 'https://www.avto.net/Ads/results.asp?$queryString';
-  
-  return url;
+  return 'https://www.avto.net/Ads/results.asp?$queryString';
 }

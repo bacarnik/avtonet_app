@@ -5,6 +5,7 @@ import 'package:html/parser.dart' show parse;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/avtonet_catalog_models.dart';
 import 'webview_stealth_config.dart';
+import '../utils/logger.dart';
 
 class AvtonetCatalogService {
   static const String _keyCatalog = 'avtonet_catalog_v3';
@@ -21,13 +22,11 @@ class AvtonetCatalogService {
         final age = DateTime.now().difference(local.lastUpdated);
         if (age.inDays < 7) {
           _cachedCatalog = local;
-          debugPrint('[CATALOG CACHE] Loaded from local storage (age: ${age.inDays} days)');
           return local;
         }
       }
     }
 
-    debugPrint('[CATALOG DOWNLOAD] Starting refresh from Avto.net...');
     try {
       final html = await _fetchSearchPage();
       if (html == null) throw Exception('Failed to fetch search page');
@@ -36,16 +35,12 @@ class AvtonetCatalogService {
       if (data.brands.isNotEmpty) {
         await _saveToLocal(data);
         _cachedCatalog = data;
-        debugPrint('[CATALOG REFRESH] Successfully updated catalog (${data.brands.length} brands)');
+        AppLogger.info('[CATALOG]', 'Catalog updated (${data.brands.length} brands)');
         return data;
       }
     } catch (e) {
-      debugPrint('[CATALOG ERROR] Failed to refresh: $e');
-      // If refresh fails, try to return stale cache as fallback
+      AppLogger.warn('[CATALOG]', 'Failed to refresh catalog: $e');
       final fallback = _cachedCatalog ?? await _loadFromLocal();
-      if (fallback != null) {
-        debugPrint('[CATALOG CACHE] Using stale cache as fallback');
-      }
       return fallback;
     }
     return null;
@@ -90,7 +85,6 @@ class AvtonetCatalogService {
 AvtonetCatalogData _parseCatalogInBackground(String html) {
   final doc = parse(html);
   
-  // 1. Parse Brands
   final List<AvtonetBrand> brands = [];
   final makeSelect = doc.querySelector('select[name="znamka"]');
   if (makeSelect != null) {
@@ -99,8 +93,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
       final value = opt.attributes['value'] ?? '';
       final displayName = opt.text.trim();
       if (value.isEmpty || opt.attributes.containsKey('disabled') || displayName.startsWith('-')) continue;
-      
-      // Avoid duplicates from "Popular" vs "All" sections
       if (brands.any((b) => b.value == value)) continue;
       
       brands.add(AvtonetBrand(
@@ -111,7 +103,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
     }
   }
 
-  // 2. Parse Models
   final Map<String, List<AvtonetModel>> modelsByBrand = {};
   final modelSelect = doc.querySelector('select[id="model"]');
   if (modelSelect != null) {
@@ -121,7 +112,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
       final className = opt.attributes['class'] ?? '';
       if (value.isEmpty || className.isEmpty || value == 'modela ni na seznamu') continue;
 
-      // Class name usually matches the brand value
       final brandKey = className.replaceAll(' vsi', '').trim();
       
       final rawText = opt.text;
@@ -135,15 +125,12 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
 
       if (isGroup) {
         subModelGroup = value.replaceAll(' (vsi)', '').trim();
-        // Za BMW "Serija" skupine dodamo dvopičje, ker ga Avto.net pričakuje v SUBmodelsearch
         searchValue = subModelGroup.toLowerCase().contains('serija') 
             ? '$subModelGroup:' 
             : subModelGroup;
       } else if (isIndented) {
         searchValue = value;
       } else {
-        // Primary model (e.g. Corsa, 106, i3)
-        // Poseben primer: BMW Serije (npr. "Serija 1") se morajo obnašati kot skupine
         if (value.toLowerCase().contains('serija')) {
           subModelGroup = value;
           searchValue = '$value:';
@@ -153,7 +140,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
         }
       }
       
-      // Note: If 'foo' attribute exists, it's a numeric ID (override)
       final fooId = opt.attributes['foo'];
       if (fooId != null && fooId.isNotEmpty) {
         modelId = fooId;
@@ -165,8 +151,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
         modelId: modelId,
         subModelGroup: subModelGroup,
       );
-
-      debugPrint('[CATALOG AUDIT] display="$displayName" value="$value" modelId="$modelId" searchValue="$searchValue"');
 
       modelsByBrand.putIfAbsent(brandKey, () => []).add(model);
     }
