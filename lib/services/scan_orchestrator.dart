@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import 'avtonet_scraper_service.dart';
@@ -7,6 +6,7 @@ import 'filter_matcher.dart';
 import 'log_service.dart';
 import 'notification_service.dart';
 import 'storage_service.dart';
+import '../utils/logger.dart';
 
 class ScanEngineResult {
   const ScanEngineResult({
@@ -56,134 +56,88 @@ class ScanEngine {
     bool isAuto = false,
     bool forceAll = false,
     String? singleId,
+    String? ownerOverride,
   }) async {
     _cancelRequested = false;
-    debugPrint('[SCAN ORCHESTRATOR START] isAuto=$isAuto forceAll=$forceAll singleId=$singleId');
-    
-    // SCAN LOCK PROTECTION
-    // Manual scan must ALWAYS execute. Skip lock logic if not auto.
-    if (isAuto) {
-      if (!await _storage.acquireScanLock()) {
-        final prefs = await SharedPreferences.getInstance();
-        final lockTime = prefs.getInt('scan_lock_time') ?? 0;
-        debugPrint('[SCAN BLOCKED BY LOCK] owner=AUTO');
-        return ScanEngineResult(
-          ok: false,
-          successCount: 0,
-          failCount: 0,
-          newListings: 0,
-          notificationsSent: 0,
-          updatedConfigs: searches,
-          error: 'Scan already in progress',
-        );
-      }
-    } else {
-      // Manual scan: Ensure no lock prevents execution
-      await _storage.releaseScanLock();
-      debugPrint('[SCAN PROCEEDING] owner=MANUAL (Lock Bypassed)');
-    }
+    final method = ownerOverride ?? (isAuto ? 'AUTO' : 'MANUAL');
+    final stopwatch = Stopwatch()..start();
 
-    debugPrint('[SCAN START]');
-    final method = isAuto ? 'AUTO' : 'MANUAL';
+    AppLogger.info('[SCAN]', 'Started (owner: $method)');
     
-    var successCount = 0;
-    var failCount = 0;
-    var totalNewFound = 0;
-    var notificationsSent = 0;
-    
-    if (isAuto) {
-      debugPrint('[AUTO SCAN]');
-    } else {
-      debugPrint('[MANUAL SCAN]');
-    }
-
-    final updatedConfigs = List<SearchConfig>.from(searches);
-    
-    debugPrint('[DB LOADED]');
-    final seenIds = await _storage.getSeenIds();
-    debugPrint('[DB LISTINGS COUNT] ${currentListings.length}');
-    debugPrint('[DB SEEN COUNT] ${seenIds.length}');
-
-    final newMatchesForThisCycle = <CarListing>[];
-
-    List<int> slotsToScan;
-    if (singleId != null) {
-      final idx = updatedConfigs.indexWhere((s) => s.id == singleId);
-      slotsToScan = idx != -1 ? [idx] : [];
-    } else if (forceAll) {
-      slotsToScan = List.generate(updatedConfigs.length, (i) => i);
-    } else {
-      slotsToScan = updatedConfigs.asMap().entries
-          .where((e) => e.value.isEnabled)
-          .map((e) => e.key)
-          .toList();
+    if (!await _storage.acquireScanLock(method)) {
+      AppLogger.warn('[SCAN]', 'Blocked by lock ($method)');
+      AppLogger.info('[SCAN]', 'Failed (Lock active)');
+      return ScanEngineResult(
+        ok: false,
+        successCount: 0,
+        failCount: 0,
+        newListings: 0,
+        notificationsSent: 0,
+        updatedConfigs: searches,
+        error: 'Skeniranje že poteka (aktivna ključavnica).',
+      );
     }
     
-    debugPrint('[DB FILTER COUNT] ${slotsToScan.length}');
-
-    String globalError = '';
-    bool criticalFailure = false;
-
     try {
+      var successCount = 0;
+      var failCount = 0;
+      var totalNewFound = 0;
+      var notificationsSent = 0;
+      
+      final updatedConfigs = List<SearchConfig>.from(searches);
+      final List<String> seenIdsList = await _storage.getSeenIds();
+      final Set<String> seenIds = Set<String>.from(seenIdsList);
+      
+      List<int> slotsToScan;
+      if (singleId != null) {
+        final idx = updatedConfigs.indexWhere((s) => s.id == singleId);
+        slotsToScan = idx != -1 ? [idx] : [];
+      } else if (forceAll) {
+        slotsToScan = List.generate(updatedConfigs.length, (i) => i);
+      } else {
+        slotsToScan = updatedConfigs.asMap().entries
+            .where((e) => e.value.isEnabled)
+            .map((e) => e.key)
+            .toList();
+      }
+
+      String globalError = '';
+      bool criticalFailure = false;
+
       for (var i = 0; i < slotsToScan.length; i++) {
-        if (_cancelRequested) break;
+        if (_cancelRequested) {
+          AppLogger.info('[SCAN]', 'Cancelled by user');
+          break;
+        }
 
         final configIndex = slotsToScan[i];
         final config = updatedConfigs[configIndex];
         
-        debugPrint('[FILTER SCAN START] index=${i + 1}/${slotsToScan.length} name=${config.name}');
         onProgress(i + 1, slotsToScan.length, config.name, 'Skeniranje...');
+        AppLogger.info('[SCRAPER]', config.name);
 
         try {
-          debugPrint('[SCRAPER START] id=${config.id}');
-          final result = await _scraper.scrapeSearchUrl(config, method: method, seenIds: seenIds);
+          final result = await _scraper.scrapeSearchUrl(config, method: method, seenIds: seenIds.toList());
 
           if (result.ok) {
             successCount++;
-            
             final parsed = result.listings;
             final matched = <CarListing>[];
 
-            int filterMatchedCount = 0;
-            int notificationAttemptedCount = 0;
-
-            debugPrint('[TOTAL PARSED FOR FILTER ${config.name}] count=${parsed.length}');
-
             for (final rawListing in parsed) {
-              CarListing l = rawListing;
-              
-              final match = FilterMatcher.matches(l, config);
-              debugPrint('[FILTER MATCH] id=${l.id} filter=${config.name} matched=${match.isMatch}');
-
+              final match = FilterMatcher.matches(rawListing, config);
               if (match.isMatch) {
-                filterMatchedCount++;
-                final alreadySeenGlobal = seenIds.contains(l.id);
-                debugPrint('[DUPLICATE CHECK GLOBAL] id=${l.id} existsInSeenIds=$alreadySeenGlobal');
-
-                if (!alreadySeenGlobal) {
-                  matched.add(l);
-                  debugPrint('[NOTIFICATION ELIGIBLE] id=${l.id} true');
-                  
-                  notificationAttemptedCount++;
-                  bool success = await _notifications.notifyNewAd(l);
-                  if (success) {
+                if (!seenIds.contains(rawListing.id)) {
+                  matched.add(rawListing);
+                  if (await _notifications.notifyNewAd(rawListing)) {
                     notificationsSent++;
-                    debugPrint('[NOTIFICATION SENT] id=${l.id}');
                   }
-                } else {
-                  debugPrint('[NOTIFICATION ELIGIBLE] id=${l.id} false (Duplicate)');
                 }
               }
             }
 
-            debugPrint('[SUMMARY FOR FILTER ${config.name}]');
-            debugPrint('[TOTAL PARSED] count=${parsed.length}');
-            debugPrint('[TOTAL FILTER MATCHED] count=$filterMatchedCount');
-            debugPrint('[TOTAL NEW ELIGIBLE] count=${matched.length}');
-            debugPrint('[TOTAL NOTIFIED] count=$notificationsSent');
-
-            newMatchesForThisCycle.addAll(matched);
             totalNewFound += matched.length;
+            AppLogger.info('[SCRAPER]', '${matched.length} new ads');
             
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
@@ -191,68 +145,79 @@ class ScanEngine {
               lastParsedCount: parsed.length,
               lastMatchedCount: matched.length,
             );
+
+            await _storage.setLastSuccessfulScan(DateTime.now());
+
+            if (matched.isNotEmpty) {
+              final currentInStorage = await _storage.loadListings();
+              final toAdd = <CarListing>[];
+              final idsToAdd = <String>[];
+
+              for (var l in matched) {
+                if (!currentInStorage.any((existing) => existing.id == l.id)) {
+                  toAdd.add(l);
+                }
+                if (!seenIds.contains(l.id)) {
+                  idsToAdd.add(l.id);
+                }
+              }
+
+              if (toAdd.isNotEmpty) {
+                await _storage.saveListings([...currentInStorage, ...toAdd]);
+              }
+              if (idsToAdd.isNotEmpty) {
+                await _storage.addSeenIds(idsToAdd);
+                seenIds.addAll(idsToAdd);
+              }
+            }
           } else {
             failCount++;
+            AppLogger.warn('[SCRAPER]', '${config.name} failed: ${result.status.name}');
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
               lastStatus: 'Napaka: ${result.status.name}',
             );
+            
             if (result.status == ScrapeStatus.cloudflareBlocked) {
-               debugPrint('[BLOCK DETECTION] Cloudflare');
-               await _notifications.notifyError('Zaznan Cloudflare block (403)');
+               globalError = 'Cloudflare Blocked';
+               if (method != 'WORKER') {
+                 await _notifications.notifyError('Zaznan Cloudflare block (403)');
+               }
                if (i == 0) criticalFailure = true; 
             } else if (result.status == ScrapeStatus.networkError) {
-               debugPrint('[TIMEOUT/NETWORK ERROR]');
                await _notifications.notifyError('Napaka v omrežju ali Timeout');
             }
           }
-        } catch (e) {
+          await _storage.saveSearches(updatedConfigs);
+        } catch (e, stack) {
+          AppLogger.error('[SCRAPER]', 'Loop exception for ${config.name}', e, stack);
           failCount++;
           updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
             lastChecked: DateTime.now(),
             lastStatus: 'Sistemska napaka',
           );
-          debugPrint('[CRITICAL SCAN FAILURE] $e');
-          await _notifications.notifyError('Kritična napaka: $e');
         }
       }
 
-      if (newMatchesForThisCycle.isNotEmpty) {
-        debugPrint('[BACKGROUND DB START]');
-        final List<CarListing> updatedListings = List.from(currentListings);
-        final List<String> idsToSave = [];
-        for (var newList in newMatchesForThisCycle) {
-          if (!updatedListings.any((l) => l.id == newList.id)) {
-            updatedListings.add(newList);
-            idsToSave.add(newList.id);
-            debugPrint('[SAVED ID TO SEEN DATABASE] ${newList.id}');
-          }
-        }
+      stopwatch.stop();
+      AppLogger.info('[NOTIFICATION]', '$notificationsSent notifications shown');
+      AppLogger.info('[SCAN]', 'Finished in ${stopwatch.elapsed.inSeconds}s. Total new ads: $totalNewFound');
 
-        await _storage.saveListings(updatedListings);
-        await _storage.addSeenIds(idsToSave);
-        debugPrint('[BACKGROUND DB END] Saved ${idsToSave.length} new IDs');
-      }
-
-      if (successCount > 0) {
-        await _storage.setLastSuccessfulScan(DateTime.now());
-      }
+      return ScanEngineResult(
+        ok: !criticalFailure && failCount < slotsToScan.length,
+        successCount: successCount,
+        failCount: failCount,
+        newListings: totalNewFound,
+        notificationsSent: notificationsSent,
+        updatedConfigs: updatedConfigs,
+        error: globalError,
+      );
+    } catch (e, stack) {
+      AppLogger.error('[SCAN]', 'Critical error during scan', e, stack);
+      AppLogger.info('[SCAN]', 'Failed (Exception)');
+      rethrow;
     } finally {
       await _storage.releaseScanLock();
-      debugPrint('[SCAN LOCK RELEASED]');
     }
-
-    debugPrint('[SCAN END]');
-    debugPrint('[NOTIFICATIONS SENT] $notificationsSent');
-
-    return ScanEngineResult(
-      ok: !criticalFailure && failCount < slotsToScan.length,
-      successCount: successCount,
-      failCount: failCount,
-      newListings: totalNewFound,
-      notificationsSent: notificationsSent,
-      updatedConfigs: updatedConfigs,
-      error: globalError,
-    );
   }
 }

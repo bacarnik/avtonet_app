@@ -29,13 +29,19 @@ class SearchConfig {
     this.lastDuplicateCount = 0,
     this.lastFoundIds = '',
     this.lastRejectionReason = '',
-    this.lastGeneratedUrl = '', // NEW: For debugging in UI
+    this.lastGeneratedUrl = '',
+    this.modelSearchValue = '',
+    this.modelId,
+    this.subModelGroup,
   });
 
   final String id;
   final String name;
   final String znamka;
   final String model;
+  final String modelSearchValue;
+  final String? modelId;
+  final String? subModelGroup;
   final String oblika;
   final int? kmMin;
   final int? kmMax;
@@ -73,12 +79,18 @@ class SearchConfig {
     String? lastFoundIds,
     String? lastRejectionReason,
     String? lastGeneratedUrl,
+    String? modelSearchValue,
+    String? modelId,
+    String? subModelGroup,
   }) {
     return SearchConfig(
       id: id,
       name: name,
       znamka: znamka,
       model: model,
+      modelSearchValue: modelSearchValue ?? this.modelSearchValue,
+      modelId: modelId ?? this.modelId,
+      subModelGroup: subModelGroup ?? this.subModelGroup,
       oblika: oblika,
       kmMin: kmMin,
       kmMax: kmMax,
@@ -107,42 +119,75 @@ class SearchConfig {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'znamka': znamka,
-        'model': model,
-        'oblika': oblika,
-        'kmMin': kmMin,
-        'kmMax': kmMax,
-        'letnikMin': letnikMin,
-        'letnikMax': letnikMax,
-        'cenaMin': cenaMin,
-        'cenaMax': cenaMax,
-        'ccmMin': ccmMin,
-        'ccmMax': ccmMax,
-        'mocMin': mocMin,
-        'mocMax': mocMax,
-        'powerUnit': powerUnit,
-        'bencin': bencin,
-        'menjalnik': menjalnik,
-        'createdAt': createdAt?.toIso8601String(),
-        'lastChecked': lastChecked?.toIso8601String(),
-        'lastStatus': lastStatus,
-        'isEnabled': isEnabled,
-        'lastParsedCount': lastParsedCount,
-        'lastMatchedCount': lastMatchedCount,
-        'lastDuplicateCount': lastDuplicateCount,
-        'lastFoundIds': lastFoundIds,
-        'lastRejectionReason': lastRejectionReason,
-        'lastGeneratedUrl': lastGeneratedUrl,
-      };
+      'id': id,
+      'name': name,
+      'znamka': znamka,
+      'model': model,
+      'oblika': oblika,
+      'kmMin': kmMin,
+      'kmMax': kmMax,
+      'letnikMin': letnikMin,
+      'letnikMax': letnikMax,
+      'cenaMin': cenaMin,
+      'cenaMax': cenaMax,
+      'ccmMin': ccmMin,
+      'ccmMax': ccmMax,
+      'mocMin': mocMin,
+      'mocMax': mocMax,
+      'powerUnit': powerUnit,
+      'bencin': bencin,
+      'menjalnik': menjalnik,
+      'createdAt': createdAt?.toIso8601String(),
+      'lastChecked': lastChecked?.toIso8601String(),
+      'lastStatus': lastStatus,
+      'isEnabled': isEnabled,
+      'lastParsedCount': lastParsedCount,
+      'lastMatchedCount': lastMatchedCount,
+      'lastDuplicateCount': lastDuplicateCount,
+      'lastFoundIds': lastFoundIds,
+      'lastRejectionReason': lastRejectionReason,
+      'lastGeneratedUrl': lastGeneratedUrl,
+      'modelSearchValue': modelSearchValue,
+      'modelId': modelId,
+      'subModelGroup': subModelGroup,
+    };
 
   factory SearchConfig.fromJson(Map<String, dynamic> json) {
+    final String legacyModel = json['model'] as String? ?? '';
+    final String? mId = json['modelId'] as String?;
+    final String? mSearch = json['modelSearchValue'] as String?;
+
+    // Izboljšana detekcija: če je mSearch prazna, jo poskusimo obnoviti
+    String finalSearchValue = (mSearch != null && mSearch.isNotEmpty) 
+        ? mSearch 
+        : (legacyModel.endsWith(':') ? legacyModel : '');
+    
+    String? finalModelId = mId ?? (legacyModel.isNotEmpty && !legacyModel.endsWith(':') ? legacyModel : null);
+
+    // VARNA MIGRACIJA: Odpravlja prejšnjo korupcijo podatkov (npr. modelId="33", modelSearchValue="33:")
+    // Če je modelSearchValue le ponovljen modelId z dodanim dvopičjem, ga očistimo.
+    // IZJEMA: BMW "Serija" modeli (npr. "Serija 1") NUJNO potrebujejo dvopičje v modelSearchValue.
+    if (finalModelId != null && finalModelId.isNotEmpty && 
+        finalSearchValue.toLowerCase() == '${finalModelId.toLowerCase()}:' &&
+        !finalModelId.toLowerCase().contains('serija')) {
+       finalSearchValue = '';
+    }
+
+    // POPRAVEK ZA BMW: Če je modelSearchValue prazna pri BMW Serijah, jo obnovimo iz modelId ali legacyModel
+    final String make = json['znamka'] as String? ?? '';
+    if (make.toLowerCase() == 'bmw' && finalSearchValue.isEmpty) {
+       final String potentialModel = finalModelId ?? legacyModel;
+       if (potentialModel.toLowerCase().contains('serija')) {
+          finalSearchValue = potentialModel.endsWith(':') ? potentialModel : '$potentialModel:';
+          finalModelId = null; // Za skupine BMW modelId v URL-ju ne sme biti nastavljen
+       }
+    }
+
     return SearchConfig(
       id: json['id'] as String,
       name: json['name'] as String? ?? 'Iskanje',
       znamka: json['znamka'] as String? ?? '',
-      model: json['model'] as String? ?? '',
+      model: legacyModel,
       oblika: json['oblika']?.toString() ?? '0',
       kmMin: json['kmMin'] as int?,
       kmMax: json['kmMax'] as int?,
@@ -171,6 +216,9 @@ class SearchConfig {
       lastFoundIds: json['lastFoundIds'] as String? ?? '',
       lastRejectionReason: json['lastRejectionReason'] as String? ?? '',
       lastGeneratedUrl: json['lastGeneratedUrl'] as String? ?? '',
+      modelSearchValue: finalSearchValue,
+      modelId: finalModelId,
+      subModelGroup: json['subModelGroup'] as String?,
     );
   }
 

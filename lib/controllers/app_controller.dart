@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
-import '../data/avtonet_catalog.dart';
-import '../data/body_types.dart';
+import '../models/avtonet_catalog_models.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import '../models/history_filter.dart';
 import '../models/scheduler_event.dart';
+import '../data/body_types.dart';
+import '../services/avtonet_catalog_service.dart';
 import '../services/avtonet_scraper_service.dart';
 import '../services/catchup_service.dart';
 import '../services/lifecycle_scheduler.dart';
@@ -14,18 +15,21 @@ import '../services/log_service.dart';
 import '../services/scan_orchestrator.dart';
 import '../services/storage_service.dart';
 import '../background/workmanager_entrypoint.dart';
+import '../utils/logger.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
     required StorageService storage,
     required LogService log,
     required AvtonetScraperService scraper,
+    required AvtonetCatalogService catalog,
     required ScanEngine orchestrator,
     required CatchUpService catchUp,
     required LifecycleScheduler lifecycleScheduler,
   })  : _storage = storage,
         _log = log,
         _scraper = scraper,
+        _catalogService = catalog,
         _orchestrator = orchestrator,
         _catchUp = catchUp,
         _lifecycleScheduler = lifecycleScheduler;
@@ -35,6 +39,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final StorageService _storage;
   final LogService _log;
   final AvtonetScraperService _scraper;
+  final AvtonetCatalogService _catalogService;
   final ScanEngine _orchestrator;
   final CatchUpService _catchUp;
   final LifecycleScheduler _lifecycleScheduler;
@@ -46,6 +51,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String _scanLabel = '';
   Timer? _autoScanTimer;
   DateTime? _nextScanTime;
+  AvtonetCatalogData? _catalog;
 
   List<SearchConfig> savedSearches = [];
   List<CarListing> savedListings = [];
@@ -57,6 +63,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String? editingId;
   String selectedMake = '';
   String selectedModel = '';
+  String selectedModelSearchValue = '';
+  String? selectedModelId;
+  String? selectedSubModelGroup;
   List<int> selectedBodyTypes = [];
   String powerUnit = 'kW';
   int selectedFuel = 0;
@@ -74,9 +83,15 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String? mocMinText;
   String? mocMaxText;
 
-  List<String> get makes => AvtonetCatalog.makes;
-  List<String> get models => AvtonetCatalog.modelsForMake(selectedMake);
+  List<AvtonetBrand> get allBrands => _catalog?.brands ?? [];
+  List<String> get makes => allBrands.map((b) => b.displayName).toList();
+  List<AvtonetModel> get availableModels => _catalog?.modelsByBrand[selectedMake] ?? [];
+  List<String> get models => availableModels.map((m) => m.displayName).toList();
   bool get isModelDropdownEnabled => selectedMake.isNotEmpty;
+
+  List<String> modelsForMake(String makeValue) {
+    return _catalog?.modelsByBrand[makeValue]?.map((m) => m.displayName).toList() ?? [];
+  }
 
   bool get initialized => _initialized;
   bool get isScanning => _isScanning;
@@ -87,41 +102,66 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AvtonetScraperService get scraper => _scraper;
   DateTime? get nextScanTime => _nextScanTime;
 
+  int? _lastTriggerMinute;
+
   Future<void> initialize() async {
-    if (_initialized) return;
-    debugPrint('[DB PROCESS] UI MAIN PROCESS');
+    WidgetsBinding.instance.removeObserver(this);
     WidgetsBinding.instance.addObserver(this);
+    
+    if (_initialized) {
+      _lifecycleScheduler.start();
+      return;
+    }
+
     await _log.loadPersisted();
+    _catalog = await _catalogService.getCatalog();
     savedSearches = await _storage.loadSearches();
     savedListings = await _storage.loadListings();
     historyFilter = await _storage.loadHistoryFilter();
     schedulerHistory = await _storage.loadSchedulerHistory();
     workerDiagnostics = await _storage.getWorkerDiagnostics();
-    debugPrint('[HISTORY LOAD] fuel=${historyFilter.fuelCode} priceMin=${historyFilter.priceMin} priceMax=${historyFilter.priceMax}');
     
     _calculateNextScanTime();
-    _autoScanTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      _calculateNextScanTime();
+    
+    _lifecycleScheduler.bind(() async {
+      _onSchedulerTick();
     });
+    _lifecycleScheduler.start();
 
     _initialized = true;
     notifyListeners();
-    // REMOVED: Automatic scan triggering on startup/timer removed per user requirement.
-    // Opening app must NEVER trigger a scan.
+    
+    final needsScan = await _storage.consumePendingBackgroundScan();
+    if (needsScan) {
+      AppLogger.info('[PENDING]', 'Starting catch-up scan');
+      runSequentialScan();
+    }
+  }
+
+  void _onSchedulerTick() {
+    final now = DateTime.now();
+    _calculateNextScanTime();
+
+    // Only trigger if in active window 08:00-22:00
+    if (now.hour < 8 || now.hour >= 22) return;
+
+    // Trigger every 15 minutes (00, 15, 30, 45)
+    if (now.minute % 15 == 0 && now.minute != _lastTriggerMinute) {
+      _lastTriggerMinute = now.minute;
+      AppLogger.info('[SCHEDULER]', 'Triggering scan');
+      runSequentialScan();
+    }
   }
 
   void _calculateNextScanTime() {
     final now = DateTime.now();
     
-    // Strict cutoff: No scans after 22:00
     if (now.hour >= 22) {
-      debugPrint('[SCHEDULE BLOCKED AFTER 22:00]');
       _nextScanTime = DateTime(now.year, now.month, now.day + 1, 8, 0);
       notifyListeners();
       return;
     }
 
-    // Find next 15-min mark: 00, 15, 30, 45
     int minute = now.minute;
     int nextMinute = ((minute ~/ 15) + 1) * 15;
     
@@ -132,59 +172,41 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       next = DateTime(now.year, now.month, now.day, now.hour, nextMinute);
     }
     
-    // Apply window rules (08:00 - 21:45 is the last start)
     if (next.hour < 8) {
       next = DateTime(next.year, next.month, next.day, 8, 0);
     } else if (next.hour >= 22) {
-      debugPrint('[SCHEDULE BLOCKED AFTER 22:00]');
       next = DateTime(next.year, next.month, next.day + 1, 8, 0);
     }
     
-    _nextScanTime = next;
-    debugPrint('[SCHEDULER] now=$now next=$_nextScanTime activeWindow=08:00-22:00 interval=15m');
+    if (_nextScanTime != next) {
+      _nextScanTime = next;
+      AppLogger.info('[SCHEDULER]', 'Next scan ${next.hour}:${next.minute.toString().padLeft(2, '0')}');
+    }
     notifyListeners();
-  }
-
-  Future<void> _processStartupTasks() async {
-    final lastSuccess = await _storage.getLastSuccessfulScan();
-    if (lastSuccess != null) {
-      final now = DateTime.now();
-      int missed = _countMissedSlots(lastSuccess, now);
-      if (missed > 0) {
-        print('[AUTO SCAN] started=$now missedIntervals=$missed catchup=true');
-        final stopwatch = Stopwatch()..start();
-        // Removed offlineCatchUp and silentIfEmpty as they are no longer in runSequentialScan
-        await runSequentialScan();
-        stopwatch.stop();
-        print('[AUTO SCAN] finished=${DateTime.now()} duration=${stopwatch.elapsed.inSeconds}s');
-      }
-    }
-
-    final pending = await _storage.consumePendingBackgroundScan();
-    if (savedSearches.isNotEmpty && (await _catchUp.shouldRunCatchUp() || pending)) {
-      await runSequentialScan();
-    }
-  }
-
-  int _countMissedSlots(DateTime last, DateTime now) {
-    int count = 0;
-    DateTime current = last.add(const Duration(minutes: 15));
-    while (current.isBefore(now)) {
-      if (current.hour >= 8 && current.hour < 22) {
-        count++;
-      }
-      current = current.add(const Duration(minutes: 15));
-    }
-    return count;
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // REMOVED: No automatic scans on resume.
+    if (state == AppLifecycleState.resumed) {
+      _checkPendingScan();
+    }
+  }
+
+  Future<void> _checkPendingScan() async {
+    final needsScan = await _storage.consumePendingBackgroundScan();
+    if (needsScan) {
+      if (!_isScanning) {
+        AppLogger.info('[PENDING]', 'Starting catch-up scan');
+        runSequentialScan();
+      } else {
+        await _storage.setPendingBackgroundScan(true);
+      }
+    }
   }
 
   void prepareNewSearch() {
     editingId = null; selectedMake = ''; selectedModel = '';
+    selectedModelSearchValue = ''; selectedModelId = null; selectedSubModelGroup = null;
     selectedBodyTypes = []; powerUnit = 'kW'; selectedFuel = 0;
     selectedTransmission = ''; draftSearchName = '';
     kmMinText = null; kmMaxText = null; letnikMinText = null;
@@ -195,6 +217,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   void loadSearchForEditing(SearchConfig config) {
     editingId = config.id; selectedMake = config.znamka; selectedModel = config.model;
+    selectedModelSearchValue = config.modelSearchValue;
+    selectedModelId = config.modelId;
+    selectedSubModelGroup = config.subModelGroup;
     selectedBodyTypes = config.oblika.split(',').map((e) => int.tryParse(e)).where((e) => e != null && e != 0).cast<int>().toList();
     powerUnit = config.powerUnit; selectedFuel = config.bencin; selectedTransmission = config.menjalnik;
     draftSearchName = config.name; kmMinText = config.kmMin?.toString(); kmMaxText = config.kmMax?.toString();
@@ -205,8 +230,26 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  void onMakeChanged(String? make) { selectedMake = make ?? ''; selectedModel = ''; notifyListeners(); }
-  void onModelChanged(String? model) { selectedModel = model ?? ''; notifyListeners(); }
+  void onMakeChanged(String? makeValue) { 
+    selectedMake = makeValue ?? '';
+    selectedModel = ''; 
+    selectedModelSearchValue = '';
+    selectedModelId = null;
+    selectedSubModelGroup = null;
+    notifyListeners(); 
+  }
+
+  void onModelChanged(String? modelName) { 
+    selectedModel = modelName ?? '';
+    final modelData = availableModels.firstWhere(
+      (m) => m.displayName == modelName,
+      orElse: () => AvtonetModel(displayName: '', searchValue: ''),
+    );
+    selectedModelSearchValue = modelData.searchValue;
+    selectedModelId = modelData.modelId;
+    selectedSubModelGroup = modelData.subModelGroup;
+    notifyListeners(); 
+  }
   void toggleBodyType(int code) {
     if (code == 0) selectedBodyTypes = [];
     else selectedBodyTypes.contains(code) ? selectedBodyTypes.remove(code) : selectedBodyTypes.add(code);
@@ -231,7 +274,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final name = draftSearchName.trim().isEmpty ? _defaultSearchName() : draftSearchName.trim();
     String oblikaCsv = selectedBodyTypes.isEmpty ? '0' : selectedBodyTypes.join(',');
     final config = SearchConfig(
-      id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), name: name, znamka: selectedMake, model: selectedModel,
+      id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), 
+      name: name, 
+      znamka: selectedMake, 
+      model: selectedModel,
+      modelSearchValue: selectedModelSearchValue,
+      modelId: selectedModelId,
+      subModelGroup: selectedSubModelGroup,
       oblika: oblikaCsv, kmMin: _parseInt(kmMinText), kmMax: _parseInt(kmMaxText), letnikMin: _parseInt(letnikMinText),
       letnikMax: _parseInt(letnikMaxText), cenaMin: _parseInt(cenaMinText), cenaMax: _parseInt(cenaMaxText),
       ccmMin: _parseInt(ccmMinText), ccmMax: _parseInt(ccmMaxText), mocMin: _parseInt(mocMinText), mocMax: _parseInt(mocMaxText),
@@ -252,12 +301,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   int? _parseInt(String? t) => (t == null || t.trim().isEmpty) ? null : int.tryParse(t.trim());
 
   Future<void> runSequentialScan({bool forceAll = false, String? singleId}) async {
-    if (_isScanning) {
-      debugPrint('[SCAN] Already scanning. Ignoring request.');
-      return;
-    }
+    if (_isScanning) return;
     
-    // Identification of items to scan
     List<SearchConfig> configsToPass;
     if (singleId != null) {
       configsToPass = savedSearches.where((s) => s.id == singleId).toList();
@@ -267,36 +312,38 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       configsToPass = savedSearches.where((s) => s.isEnabled).toList();
     }
     
-    if (configsToPass.isEmpty) {
-      debugPrint('[SCAN] No filters to scan.');
-      return;
-    }
+    if (configsToPass.isEmpty) return;
     
     _isScanning = true; _scanTotal = configsToPass.length; _scanIndex = 0; notifyListeners();
     
-    final result = await _orchestrator.scan(
-      searches: savedSearches, 
-      currentListings: savedListings,
-      onProgress: (idx, total, lbl, st) { 
-        _scanIndex = idx; 
-        _scanTotal = total; 
-        _scanLabel = lbl; 
-        notifyListeners(); 
-      },
-      isAuto: false,
-      forceAll: forceAll,
-      singleId: singleId,
-    );
-    
-    if (result.successCount > 0) {
-      await _storage.setLastScanNewCount(result.newListings);
-      debugPrint('[MANUAL SCAN] results=${result.newListings}');
-    } else if (result.failCount > 0) {
-      await _storage.setLastFailedScan(DateTime.now(), 'Scan failed');
-    }
+    try {
+      final result = await _orchestrator.scan(
+        searches: savedSearches, 
+        currentListings: savedListings,
+        onProgress: (idx, total, lbl, st) { 
+          _scanIndex = idx; 
+          _scanTotal = total; 
+          _scanLabel = lbl; 
+          notifyListeners(); 
+        },
+        isAuto: false,
+        forceAll: forceAll,
+        singleId: singleId,
+      );
+      
+      if (result.successCount > 0) {
+        await _storage.setLastScanNewCount(result.newListings);
+      } else if (result.failCount > 0) {
+        await _storage.setLastFailedScan(DateTime.now(), 'Scan failed');
+      }
 
-    savedSearches = result.updatedConfigs; await _storage.saveSearches(savedSearches);
-    savedListings = await _storage.loadListings(); _isScanning = false; notifyListeners();
+      savedSearches = result.updatedConfigs; 
+      await _storage.saveSearches(savedSearches);
+      savedListings = await _storage.loadListings();
+    } finally {
+      _isScanning = false; 
+      notifyListeners();
+    }
   }
 
   void cancelScan() {
@@ -334,7 +381,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> runWorkerNow() async {
     await runTestBackgroundTask();
-    // Give it a moment then refresh
     Future.delayed(const Duration(seconds: 5), () => refreshDiagnostics());
   }
 
@@ -349,39 +395,20 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> updateHistoryFilter(HistoryFilter newFilter) async {
-    final oldFilter = historyFilter;
     historyFilter = newFilter;
     await _storage.saveHistoryFilter(historyFilter);
-    debugPrint('[HISTORY SAVE] fuel=${historyFilter.fuelCode} priceMin=${historyFilter.priceMin} priceMax=${historyFilter.priceMax}');
-    _compareHistoryFilters(oldFilter, historyFilter);
     notifyListeners();
   }
 
   Future<void> resetHistoryFilter() async {
     historyFilter = const HistoryFilter();
     await _storage.saveHistoryFilter(historyFilter);
-    debugPrint('[RESET FILTERS] fuel=0 priceMin=null priceMax=null');
     notifyListeners();
-  }
-
-  void _compareHistoryFilters(HistoryFilter old, HistoryFilter updated) {
-    final lostFields = <String>[];
-    if (old.priceMin != null && updated.priceMin == null) lostFields.add('priceMin');
-    if (old.priceMax != null && updated.priceMax == null) lostFields.add('priceMax');
-    if (old.fuelCode != 0 && updated.fuelCode == 0) lostFields.add('fuelCode');
-    if (old.make.isNotEmpty && updated.make.isEmpty) lostFields.add('make');
-    
-    if (lostFields.isNotEmpty) {
-      debugPrint('[COMPARISON WARNING] Lost/Changed fields: ${lostFields.join(', ')}');
-    } else {
-      debugPrint('[COMPARISON] No critical fields lost during save/load cycle.');
-    }
   }
 
   String _defaultSearchName() {
     final make = selectedMake.isEmpty ? 'Vse znamke' : selectedMake;
-    String bodyLabel = selectedBodyTypes.isEmpty ? 'Vse oblike' : selectedBodyTypes.map((c) => kBodyTypes.firstWhere((b) => b.code == c, orElse: () => kBodyTypes.first).label).join(', ');
-    return '$make · $bodyLabel';
+    return '$make ${selectedModel.isEmpty ? "" : selectedModel}';
   }
 
   String bodyTypeLabel(String csv) {
@@ -389,5 +416,5 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return csv.split(',').map((e) => int.tryParse(e)).where((e) => e != null).map((c) => kBodyTypes.firstWhere((b) => b.code == c, orElse: () => kBodyTypes.first).label).join(', ');
   }
 
-  @override void dispose() { _autoScanTimer?.cancel(); WidgetsBinding.instance.removeObserver(this); _lifecycleScheduler.dispose(); super.dispose(); }
+  @override void dispose() { WidgetsBinding.instance.removeObserver(this); _lifecycleScheduler.dispose(); super.dispose(); }
 }

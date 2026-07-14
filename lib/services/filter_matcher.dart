@@ -15,7 +15,6 @@ class FilterMatcher {
     // 1. Brand matching
     if (config.znamka.isNotEmpty) {
       if (!StringUtils.contains(listing.title, config.znamka)) {
-        debugPrint('[FILTER MISMATCH] Expected=${config.znamka} Got=${listing.title}');
         return FilterMatchResult(isMatch: false, reason: 'Znamka mismatch: ${listing.title} vs ${config.znamka}');
       }
     }
@@ -42,7 +41,6 @@ class FilterMatcher {
       }
 
       if (!modelMatch) {
-        debugPrint('[FILTER MISMATCH] Model mismatch. Expected=${config.znamka} ${config.model} Got=${listing.title}');
         return FilterMatchResult(isMatch: false, reason: 'Model mismatch: ${listing.title} vs ${config.model}');
       }
     }
@@ -88,7 +86,6 @@ class FilterMatcher {
     // 7. SECONDARY BODY-TYPE VALIDATOR (STRICT)
     final secondaryRes = _validateSecondaryBodyTypeStrict(listing, config);
     if (!secondaryRes.isMatch) {
-      debugPrint('[FILTER MISMATCH] Expected (Code)=${config.oblika} Detected=${listing.bodyType} Listing=${listing.title}');
       return secondaryRes;
     }
 
@@ -119,8 +116,6 @@ class FilterMatcher {
        if (maxVal < 9999 && listingVal > maxVal) isMatch = false;
     }
     
-    debugPrint('[POWER FILTER] listingPowerKw=${listing.powerKw} listingPowerHp=${listing.powerHp} filterMin=$minVal filterMax=$maxVal match=$isMatch');
-
     if (!isMatch) {
       return FilterMatchResult(isMatch: false, reason: 'Power mismatch: $listingVal ${config.powerUnit} not in range $minVal - $maxVal');
     }

@@ -1,6 +1,5 @@
-import 'package:flutter/foundation.dart';
-import '../data/filter_options.dart';
 import '../models/search_config.dart';
+import '../data/filter_options.dart';
 
 String? _eq7ForTransmission(String menjalnik) {
   for (final t in kTransmissionOptions) {
@@ -17,21 +16,17 @@ int? _normalizePower(int? value, String unit) {
   return value;
 }
 
-/// REFACTORED: Fixed brand/model mapping, power parameters, and query construction.
+/// REFACTORED: Uses exact values from Avto.net catalog.
 String buildAvtonetResultsUrl(SearchConfig config) {
   final String eq7 = _eq7ForTransmission(config.menjalnik) ?? '1110100120';
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
 
-  final String znamka = config.znamka.toLowerCase();
-  
-  // Use SUBmodelsearch to bypass the generation selection page which causes 0 results in app.
-  final String subModelSearch = config.model;
-
   final params = <String, String>{
-    'znamka': znamka,
-    'model': '', // Leave empty when using SUBmodelsearch for better reliability
-    'SUBmodelsearch': subModelSearch,
+    'znamka': config.znamka,
+    'model': config.modelSearchValue.isNotEmpty ? '' : (config.modelId ?? ''), 
+    'SUBmodelsearch': config.modelSearchValue,
+    'SUBmodgrp1': config.subModelGroup ?? '0',
     'tip': 'katerikoli tip',
     'cenaMin': '${config.cenaMin ?? 0}',
     'cenaMax': '${config.cenaMax ?? 999999}',
@@ -42,7 +37,7 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'oblika': config.oblika,
     'ccmMin': '${config.ccmMin ?? 0}',
     'ccmMax': '${config.ccmMax ?? 99999}',
-    'mocMin': '', // Avto.net uses kwMin/kwMax for power filtering
+    'mocMin': '', 
     'mocMax': '',
     'kmMin': '${config.kmMin ?? 0}',
     'kmMax': '${config.kmMax ?? 9999999}',
@@ -61,6 +56,16 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'stran': '1',
   };
 
+  if (params['SUBmodelsearch']!.isNotEmpty) {
+    params['model'] = '';
+  }
+
+  if (params['model'] == '' && params['SUBmodelsearch'] == '') {
+    params.remove('model');
+  }
+  if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
+  if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
+
   return _buildFromMap(params);
 }
 
@@ -69,11 +74,11 @@ String buildMinimalAvtonetUrl(SearchConfig config) {
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
 
-  final String znamka = config.znamka.toLowerCase();
-
   final params = <String, String>{
-    'znamka': znamka,
-    'SUBmodelsearch': config.model,
+    'znamka': config.znamka,
+    'model': config.modelSearchValue.isNotEmpty ? '' : (config.modelId ?? ''),
+    'SUBmodelsearch': config.modelSearchValue,
+    'SUBmodgrp1': config.subModelGroup ?? '0',
     'cenaMin': '${config.cenaMin ?? 0}',
     'cenaMax': '${config.cenaMax ?? 999999}',
     'kmMin': '${config.kmMin ?? 0}',
@@ -84,24 +89,19 @@ String buildMinimalAvtonetUrl(SearchConfig config) {
     'stran': '1',
   };
 
+  if (params['model'] == '' && (params['SUBmodelsearch']?.isEmpty ?? true)) {
+    params.remove('model');
+  }
+  if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
+  if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
+
   return _buildFromMap(params);
 }
 
 String _buildFromMap(Map<String, String> params) {
-  params.remove('EQ8');
-
-  // Standard Uri construction in Dart removes '=' for empty values.
-  // Manual construction preserves them.
   final queryString = params.entries
       .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
       .join('&');
   
-  final url = 'https://www.avto.net/Ads/results.asp?$queryString';
-  
-  debugPrint('================================');
-  debugPrint('[AVTONET URL BUILD]');
-  debugPrint('URL: $url');
-  debugPrint('================================');
-  
-  return url;
+  return 'https://www.avto.net/Ads/results.asp?$queryString';
 }

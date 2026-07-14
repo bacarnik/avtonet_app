@@ -4,7 +4,70 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' show parse;
 import '../models/car_listing.dart';
 
+class PaginationInfo {
+  const PaginationInfo({
+    required this.hasNext,
+    required this.currentPage,
+    required this.totalPages,
+    required this.totalItems,
+  });
+  final bool hasNext;
+  final int currentPage;
+  final int totalPages;
+  final int totalItems;
+
+  @override
+  String toString() => 'hasNext=$hasNext current=$currentPage totalPages=$totalPages totalItems=$totalItems';
+}
+
 class AvtonetHtmlParser {
+  static PaginationInfo parsePagination(dom.Document doc) {
+    bool hasNext = false;
+    int current = 1;
+    int totalP = 1;
+    int totalI = 0;
+
+    try {
+      // 1. Detect Next Page Button
+      final nextEl = doc.querySelector('a.page-link[aria-label="Next"], a.page-link i.fa-chevron-right');
+      if (nextEl != null) {
+        hasNext = true;
+      } else {
+        // Fallback for next page
+        final allLinks = doc.querySelectorAll('a.page-link');
+        for (final link in allLinks) {
+          if (link.text.contains('Naslednja') || link.innerHtml.contains('fa-chevron-right')) {
+            hasNext = true;
+            break;
+          }
+        }
+      }
+
+      // 2. Detect Current and Total Pages from pagination text "Stran 1 od 10" or similar
+      final paginationText = doc.querySelector('.pagination, .pagination-container')?.text ?? '';
+      final pageMatch = RegExp(r'Stran\s+(\d+)\s+od\s+(\d+)', caseSensitive: false).firstMatch(paginationText);
+      if (pageMatch != null) {
+        current = int.tryParse(pageMatch.group(1)!) ?? 1;
+        totalP = int.tryParse(pageMatch.group(2)!) ?? 1;
+      }
+
+      // 3. Detect total items "Število najdenih oglasov: 123"
+      final itemsMatch = RegExp(r'najdenih oglasov:\s*(\d+)', caseSensitive: false).firstMatch(doc.body?.text ?? '');
+      if (itemsMatch != null) {
+        totalI = int.tryParse(itemsMatch.group(1)!) ?? 0;
+      }
+    } catch (e) {
+      debugPrint('[PARSER PAGINATION ERROR] $e');
+    }
+
+    return PaginationInfo(
+      hasNext: hasNext,
+      currentPage: current,
+      totalPages: totalP,
+      totalItems: totalI,
+    );
+  }
+
   static bool isCloudflareChallenge(String html) {
     final lower = html.toLowerCase();
     return lower.contains('cf-browser-verification') ||
@@ -16,31 +79,7 @@ class AvtonetHtmlParser {
 
   static List<dom.Element> findListingRows(dom.Document doc) {
     // RESTORED: Multi-layered row detection for stability.
-    // Log candidate selectors found in the page.
-    final hasMain = doc.querySelector('.GO-Results-Main') != null;
-    final hasFormAds = doc.querySelector('form#Ads') != null;
-    final rowCount = doc.querySelectorAll('div.GO-Results-Row').length;
-    final topPonudbaCount = doc.querySelectorAll('div.GO-Results-Top-Ponudba').length;
-    
-    debugPrint('[PARSER] Candidates: hasMain=$hasMain hasFormAds=$hasFormAds rowCount=$rowCount topPonudbaCount=$topPonudbaCount');
-
-    final rows = doc.querySelectorAll('div.GO-Results-Row, div.GO-Results-Top-Ponudba');
-    
-    if (rows.isEmpty) {
-      debugPrint('[PARSER FAILURE] HTML structure mismatch. Zero listing rows found.');
-      
-      if (doc.body == null) {
-        debugPrint('[PARSER] BODY IS NULL');
-      } else {
-        debugPrint(
-          '[PARSER BODY PREVIEW] ${doc.body!.outerHtml.substring(0, min(5000, doc.body!.outerHtml.length))}',
-        );
-      }
-    } else {
-      debugPrint('[PARSER] Found ${rows.length} listing nodes');
-    }
-
-    return rows.toList();
+    return doc.querySelectorAll('div.GO-Results-Row, div.GO-Results-Top-Ponudba').toList();
   }
 
   static List<CarListing> parseListings(
@@ -61,9 +100,6 @@ class AvtonetHtmlParser {
 
     for (int i = 0; i < rows.length; i++) {
       final element = rows[i];
-      if (i == 0) {
-        debugPrint('[PARSER DEBUG] Row 0 HTML snippet: ${element.outerHtml.substring(0, min(1000, element.outerHtml.length))}');
-      }
       String currentIdForError = 'unknown';
       try {
         final titleEl = element.querySelector('div.GO-Results-Naziv');
@@ -94,10 +130,6 @@ class AvtonetHtmlParser {
         if (id == null) continue;
         currentIdForError = id;
 
-        debugPrint('[PARSER] Extracted title=$title');
-        debugPrint('[PARSER] Extracted url=$link');
-        debugPrint('[PARSER] Extracted id=$id');
-
         if (title.isEmpty || title.toLowerCase() == 'oglas') {
           final uri = Uri.tryParse(link);
           if (uri != null && uri.queryParameters.containsKey('display')) {
@@ -111,9 +143,6 @@ class AvtonetHtmlParser {
         seenIdsInBatch.add(id);
 
         final bool isNewListing = !seenIds.contains(id);
-
-        // LOGGING AS REQUESTED: [LISTING] id=xxxxx new=true topOffer=true
-        debugPrint('[LISTING] id=$id new=$isNewListing topOffer=$isTopOffer title=$title');
 
         final priceEl = element.querySelector('.GO-Results-Row-PRICE, .Price, .price, .ResultRowPrice');
         String price = priceEl?.text.trim() ?? '';
@@ -130,12 +159,6 @@ class AvtonetHtmlParser {
         final fuel = _extractFuel(scopeText);
         final bodyType = _detectBodyType(title, scopeText);
         final power = _extractPower(scopeText);
-
-        if (bodyType == 0) {
-          final String snippet = element.text.replaceAll(RegExp(r'\s+'), ' ').trim();
-          final String limitedSnippet = snippet.length > 300 ? snippet.substring(0, 300) : snippet;
-          debugPrint('[BODY TYPE PARSE FAILED] listing=$title id=$id content=$limitedSnippet');
-        }
 
         var imageUrl = '';
         final imgEl = element.querySelector('.GO-Results-Photo img, .ResultsPhoto img, img');

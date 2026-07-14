@@ -1,58 +1,49 @@
 import 'package:workmanager/workmanager.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 import '../services/storage_service.dart';
-import '../models/scheduler_event.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/avtonet_scraper_service.dart';
 import '../services/scan_orchestrator.dart';
+import '../utils/logger.dart';
 
 const String kPeriodicScanTask = 'avtonet_periodic_scan_v3';
 
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
-    final String workerId = DateTime.now().millisecondsSinceEpoch.toString().substring(7);
-    debugPrint('[WORKER ID] $workerId');
-    debugPrint('[WORKER START] task=$taskName');
+    WidgetsFlutterBinding.ensureInitialized();
+    final logService = LogService();
+    AppLogger.init(logService);
     
+    final storage = StorageService();
     final now = DateTime.now();
     final stopwatch = Stopwatch()..start();
-    final StringBuffer detailLog = StringBuffer();
-    
-    void log(String msg) {
-      final line = '[${DateTime.now().toString().split(' ').last.substring(0, 8)}] $msg';
-      debugPrint('[WORKER ID $workerId] $line');
-      detailLog.writeln(line);
-    }
-
-    final storage = StorageService();
     await storage.recordWorkerStart(now);
 
-    // REMOVED: Redundant lock check here. ScanEngine.scan handles locking.
-    // This was causing the worker to block itself.
-    log('[WORKER EXECUTION START]');
+    String exitReason = 'UNKNOWN';
+    int activeCount = 0;
+    int successCount = 0;
+    int failedCount = 0;
 
     try {
       if (now.hour < 8 || now.hour >= 22) {
-        log('Night pause active (22-08). Skipping scan.');
-        await storage.releaseScanLock();
-        debugPrint('[WORKER END] ID=$workerId (night pause)');
-        return Future.value(true);
+        exitReason = 'NIGHT_PAUSE';
+        await storage.recordWorkerFinish(now, true, resultStatus: exitReason);
+        return true;
       }
 
       final searches = await storage.loadSearches();
       final activeFilters = searches.where((s) => s.isEnabled).toList();
+      activeCount = activeFilters.length;
       
       if (activeFilters.isEmpty) {
-        log('No active filters. Skipping scan.');
-        await storage.releaseScanLock();
-        debugPrint('[WORKER END] ID=$workerId (no active filters)');
-        return Future.value(true);
+        exitReason = 'NO_FILTERS';
+        await storage.recordWorkerFinish(now, true, resultStatus: 'NO_FILTERS');
+        return true;
       }
 
-      final logService = LogService();
       final notificationService = NotificationService.instance;
       await notificationService.initialize();
       
@@ -69,70 +60,82 @@ void callbackDispatcher() {
       final result = await engine.scan(
         searches: searches,
         currentListings: currentListings,
-        onProgress: (idx, total, lbl, st) {
-          log('Filter $idx/$total: $lbl - $st');
-        },
-        logger: log, 
+        onProgress: (idx, total, lbl, st) {},
         isAuto: true,
+        ownerOverride: 'WORKER',
       );
 
-      log('========== SCAN RESULT ==========');
-      log('ok=${result.ok}');
-      log('successCount=${result.successCount}');
-      log('failCount=${result.failCount}');
-      log('newListings=${result.newListings}');
-      log('notificationsSent=${result.notificationsSent}');
-      log('error=${result.error}');
-      log('=================================');
+      successCount = result.successCount;
+      failedCount = result.failCount;
 
-      stopwatch.stop();
-      log('[WORKER FINISHED] - Duration: ${stopwatch.elapsed.inSeconds}s');
-      debugPrint('[WORKER END] ID=$workerId Status=${result.ok ? 'SUCCESS' : 'FAILURE'}');
+      exitReason = 'SUCCESS';
+      if (!result.ok) {
+        final err = result.error.toLowerCase();
+        if (err.contains('ključavnica')) {
+          exitReason = 'LOCK_ACTIVE';
+        } else if (err.contains('cloudflare') || err.contains('403')) {
+          exitReason = 'CLOUDFLARE';
+          await storage.setPendingBackgroundScan(true);
+        } else if (err.contains('webview') && err.contains('timeout')) {
+          exitReason = 'WEBVIEW_TIMEOUT';
+        } else if (err.contains('timeout') || err.contains('network')) {
+          exitReason = 'HTTP_TIMEOUT';
+        } else {
+          exitReason = 'ERROR';
+        }
+      }
 
       await storage.recordWorkerFinish(
         DateTime.now(), 
-        result.ok,
-        filtersScanned: activeFilters.length,
+        true, 
+        filtersScanned: activeCount,
         newAdsFound: result.newListings,
         notificationsSent: result.notificationsSent,
+        resultStatus: exitReason,
       );
       
-      await storage.releaseScanLock();
-      return Future.value(result.ok);
-    } catch (e) {
-      log('WORKER ERROR: $e');
-      await storage.recordWorkerFinish(DateTime.now(), false, error: e.toString());
-      await storage.releaseScanLock();
-      debugPrint('[WORKER END] ID=$workerId Status=ERROR');
-      return Future.value(false); 
+      await storage.recordWorkerStats(
+        durationMs: stopwatch.elapsedMilliseconds,
+        activeFilters: activeCount,
+        successFilters: successCount,
+        failedFilters: failedCount,
+        usedHttpClient: true,
+        usedWebView: true,
+      );
+
+      return true;
+    } catch (e, stack) {
+      AppLogger.error('[BACKGROUND]', 'Worker exception', e, stack);
+      await storage.recordWorkerFinish(
+        DateTime.now(), 
+        false, 
+        error: e.toString(), 
+        resultStatus: 'EXCEPTION'
+      );
+      return false;
     }
   });
 }
 
 Future<void> registerBackgroundTasks() async {
   try {
-    debugPrint('[WORK REGISTER ATTEMPT]');
-    // Set isInDebugMode to false to avoid debug notifications as requested
+    final storage = StorageService();
     await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
     
-    await Workmanager().cancelAll();
-    debugPrint('[WORKER CANCELLED PREVIOUS]');
-
     await Workmanager().registerPeriodicTask(
       kPeriodicScanTask,
       kPeriodicScanTask,
       frequency: const Duration(minutes: 15),
       initialDelay: const Duration(seconds: 10),
+      existingWorkPolicy: ExistingWorkPolicy.keep,
       constraints: Constraints(
         networkType: NetworkType.connected,
       ),
-      existingWorkPolicy: ExistingWorkPolicy.keep,
     );
     
-    debugPrint('[WORK REGISTER SUCCESS]');
-    debugPrint('[WORKER REGISTERED]');
-  } catch (e) {
-    debugPrint('[SCHEDULER ERROR] Registration failed: $e');
+    await storage.recordWorkerRegistration(DateTime.now());
+  } catch (e, stack) {
+    AppLogger.error('[BACKGROUND]', 'Workmanager registration failed', e, stack);
   }
 }
 

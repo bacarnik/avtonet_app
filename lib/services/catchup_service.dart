@@ -1,20 +1,17 @@
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
-import 'log_service.dart';
 import 'scan_orchestrator.dart';
 import 'storage_service.dart';
+import '../utils/logger.dart';
 
 class CatchUpService {
   CatchUpService({
     required StorageService storage,
-    required LogService log,
     required ScanEngine orchestrator,
   })  : _storage = storage,
-        _log = log,
         _orchestrator = orchestrator;
 
   final StorageService _storage;
-  final LogService _log;
   final ScanEngine _orchestrator;
 
   static const scanIntervalMinutes = 30;
@@ -39,17 +36,14 @@ class CatchUpService {
     final gapMin = await offlineGapMinutes();
     if (gapMin < scanIntervalMinutes) return null;
 
-    final cycles = gapMin ~/ scanIntervalMinutes;
-    _log.info(
-      'Zaznana vrsta brez povezave: ${gapMin ~/ 60} h ${gapMin % 60} min. '
-      'Dopolnilno večstransko skeniranje (manjkajoči cikli: $cycles).',
-    );
+    AppLogger.info('[SCAN]', 'Offline gap detected: ${gapMin ~/ 60} h ${gapMin % 60} min. Triggering catch-up.');
 
     return _orchestrator.scan(
       searches: searches,
       currentListings: listings,
       onProgress: onProgress,
-      isAuto: false, // CatchUp is typically triggered when app opens, so it's "Semi-Manual"
+      isAuto: false, 
+      ownerOverride: 'CATCHUP',
     );
   }
 }

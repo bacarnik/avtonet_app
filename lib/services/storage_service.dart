@@ -1,9 +1,9 @@
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import '../models/history_filter.dart';
 import '../models/scheduler_event.dart';
+import '../utils/logger.dart';
 
 class StorageService {
   static const keySearches = 'saved_searches_v5';
@@ -29,6 +29,18 @@ class StorageService {
   static const keyWorkerNewAdsFound = 'worker_new_ads_found';
   static const keyWorkerNotificationsSent = 'worker_notifications_sent';
   static const keyLastNotificationAt = 'last_notification_at';
+  static const keyLastWorkerRegistration = 'last_worker_registration_at';
+  static const keyLastWorkerResult = 'last_worker_result_status';
+
+  // Extended Diagnostics
+  static const keyWorkerLastSuccessAt = 'worker_last_success_at';
+  static const keyWorkerLastFailureAt = 'worker_last_failure_at';
+  static const keyWorkerDurationMs = 'worker_last_duration_ms';
+  static const keyWorkerActiveFilters = 'worker_active_filters_count';
+  static const keyWorkerSuccessFilters = 'worker_success_filters_count';
+  static const keyWorkerFailedFilters = 'worker_failed_filters_count';
+  static const keyWorkerUsedHttpClient = 'worker_used_http_client';
+  static const keyWorkerUsedWebView = 'worker_used_webview';
 
   Future<List<SearchConfig>> loadSearches() async {
     final prefs = await SharedPreferences.getInstance();
@@ -87,19 +99,23 @@ class StorageService {
     await prefs.setInt(keyLastScanNewCount, count);
   }
 
-  Future<bool> acquireScanLock() async {
+  Future<bool> acquireScanLock(String owner) async {
     final prefs = await SharedPreferences.getInstance();
     final isLocked = prefs.getBool('scan_lock_active') ?? false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
     if (isLocked) {
       final lockTime = prefs.getInt('scan_lock_time') ?? 0;
-      final now = DateTime.now().millisecondsSinceEpoch;
-      // Stale lock protection: 10 minutes
       if (now - lockTime < 10 * 60 * 1000) {
         return false;
+      } else {
+        AppLogger.warn('[SCAN]', 'Stale lock detected, overriding (Owner: $owner)');
       }
     }
+    
     await prefs.setBool('scan_lock_active', true);
-    await prefs.setInt('scan_lock_time', DateTime.now().millisecondsSinceEpoch);
+    await prefs.setInt('scan_lock_time', now);
+    await prefs.setString('scan_lock_owner', owner);
     return true;
   }
 
@@ -107,6 +123,7 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('scan_lock_active', false);
     await prefs.remove('scan_lock_time');
+    await prefs.remove('scan_lock_owner');
   }
 
   Future<List<SchedulerEvent>> loadSchedulerHistory() async {
@@ -119,7 +136,6 @@ class StorageService {
     await prefs.setString(keySchedulerHistory, SchedulerEvent.listToJsonString(list));
   }
 
-  /// Delta Filtering: Persistent cache of seen vehicle IDs
   Future<List<String>> getSeenIds() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getStringList(keySeenIds) ?? [];
@@ -130,7 +146,6 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     final current = prefs.getStringList(keySeenIds) ?? [];
     final updated = {...current, ...ids}.toList();
-    // Cap at 2000 IDs to prevent storage bloat
     if (updated.length > 2000) {
       updated.removeRange(0, updated.length - 2000);
     }
@@ -154,6 +169,11 @@ class StorageService {
     await prefs.setInt(keyLastSuccessfulScan, time.millisecondsSinceEpoch);
   }
 
+  Future<void> setPendingBackgroundScan(bool pending) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(keyPendingBackgroundScan, pending);
+  }
+
   Future<bool> consumePendingBackgroundScan() async {
     final prefs = await SharedPreferences.getInstance();
     final pending = prefs.getBool(keyPendingBackgroundScan) ?? false;
@@ -165,13 +185,8 @@ class StorageService {
 
   Future<void> recordWorkerStart(DateTime time) async {
     final prefs = await SharedPreferences.getInstance();
-    
-    // Get previous start to check for day change
     final previousStartMs = prefs.getInt(keyWorkerStartedAt);
-    
     await prefs.setInt(keyWorkerStartedAt, time.millisecondsSinceEpoch);
-    
-    // Increment daily count
     if (previousStartMs != null) {
       final lastDate = DateTime.fromMillisecondsSinceEpoch(previousStartMs);
       if (lastDate.day != time.day || lastDate.month != time.month || lastDate.year != time.year) {
@@ -193,9 +208,11 @@ class StorageService {
     int? adsParsed,
     int? newAdsFound,
     int? notificationsSent,
+    String? resultStatus,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(keyWorkerFinishedAt, time.millisecondsSinceEpoch);
+    final finishVal = time.millisecondsSinceEpoch;
+    await prefs.setInt(keyWorkerFinishedAt, finishVal);
     await prefs.setBool(keyWorkerSucceeded, success);
     if (error != null) {
       await prefs.setString(keyWorkerError, error);
@@ -206,6 +223,34 @@ class StorageService {
     if (adsParsed != null) await prefs.setInt(keyWorkerAdsParsed, adsParsed);
     if (newAdsFound != null) await prefs.setInt(keyWorkerNewAdsFound, newAdsFound);
     if (notificationsSent != null) await prefs.setInt(keyWorkerNotificationsSent, notificationsSent);
+    if (resultStatus != null) await prefs.setString(keyLastWorkerResult, resultStatus);
+    if (success) {
+      await prefs.setInt(keyWorkerLastSuccessAt, finishVal);
+    } else {
+      await prefs.setInt(keyWorkerLastFailureAt, finishVal);
+    }
+  }
+
+  Future<void> recordWorkerStats({
+    required int durationMs,
+    required int activeFilters,
+    required int successFilters,
+    required int failedFilters,
+    required bool usedHttpClient,
+    required bool usedWebView,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(keyWorkerDurationMs, durationMs);
+    await prefs.setInt(keyWorkerActiveFilters, activeFilters);
+    await prefs.setInt(keyWorkerSuccessFilters, successFilters);
+    await prefs.setInt(keyWorkerFailedFilters, failedFilters);
+    await prefs.setBool(keyWorkerUsedHttpClient, usedHttpClient);
+    await prefs.setBool(keyWorkerUsedWebView, usedWebView);
+  }
+
+  Future<void> recordWorkerRegistration(DateTime time) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(keyLastWorkerRegistration, time.millisecondsSinceEpoch);
   }
 
   Future<void> setWorkerDetailLog(String log) async {
@@ -237,6 +282,16 @@ class StorageService {
       'newAdsFound': prefs.getInt(keyWorkerNewAdsFound) ?? 0,
       'notificationsSent': prefs.getInt(keyWorkerNotificationsSent) ?? 0,
       'lastNotificationAt': prefs.getInt(keyLastNotificationAt),
+      'lastRegistration': prefs.getInt(keyLastWorkerRegistration),
+      'lastResult': prefs.getString(keyLastWorkerResult),
+      'lastSuccessAt': prefs.getInt(keyWorkerLastSuccessAt),
+      'lastFailureAt': prefs.getInt(keyWorkerLastFailureAt),
+      'durationMs': prefs.getInt(keyWorkerDurationMs),
+      'activeFilters': prefs.getInt(keyWorkerActiveFilters),
+      'successFilters': prefs.getInt(keyWorkerSuccessFilters),
+      'failedFilters': prefs.getInt(keyWorkerFailedFilters),
+      'usedHttpClient': prefs.getBool(keyWorkerUsedHttpClient),
+      'usedWebView': prefs.getBool(keyWorkerUsedWebView),
     };
   }
 }

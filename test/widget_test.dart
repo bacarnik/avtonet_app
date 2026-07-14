@@ -26,7 +26,7 @@ void main() {
       log: log,
       scraper: scraper,
       orchestrator: engine,
-      catchUp: CatchUpService(storage: storage, log: log, orchestrator: engine),
+      catchUp: CatchUpService(storage: storage, orchestrator: engine),
       lifecycleScheduler: LifecycleScheduler(),
     );
 

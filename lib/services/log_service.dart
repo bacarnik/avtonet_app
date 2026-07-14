@@ -1,8 +1,6 @@
 import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../models/log_entry.dart';
 
 class LogService extends ChangeNotifier {
@@ -37,13 +35,11 @@ class LogService extends ChangeNotifier {
     }
   }
 
-  void info(String message) => _add(message, LogLevel.info);
+  void info(String message) => add(message, LogLevel.info);
+  void warning(String message) => add(message, LogLevel.warning);
+  void error(String message) => add(message, LogLevel.error);
 
-  void warning(String message) => _add(message, LogLevel.warning);
-
-  void error(String message) => _add(message, LogLevel.error);
-
-  void _add(String message, LogLevel level) {
+  void add(String message, LogLevel level, {bool quiet = false}) {
     _entries.insert(
       0,
       LogEntry(message: message, timestamp: DateTime.now(), level: level),
@@ -51,7 +47,9 @@ class LogService extends ChangeNotifier {
     if (_entries.length > maxEntries) {
       _entries.removeRange(maxEntries, _entries.length);
     }
-    debugPrint('[${level.name}] $message');
+    if (!quiet) {
+      debugPrint('[${level.name.toUpperCase()}] $message');
+    }
     notifyListeners();
     _persist();
   }

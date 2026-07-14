@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'background/workmanager_entrypoint.dart';
 import 'controllers/app_controller.dart';
 import 'screens/home_screen.dart';
+import 'services/avtonet_catalog_service.dart';
 import 'services/avtonet_scraper_service.dart';
 import 'services/catchup_service.dart';
 import 'services/lifecycle_scheduler.dart';
@@ -11,19 +12,21 @@ import 'services/notification_service.dart';
 import 'services/scan_orchestrator.dart';
 import 'services/storage_service.dart';
 import 'theme/app_theme.dart';
+import 'utils/logger.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final log = LogService();
+  AppLogger.init(log);
+  
   final storage = StorageService();
   final notifications = NotificationService.instance;
   await notifications.initialize(requestPermission: true);
 
+  final catalog = AvtonetCatalogService();
   final scraper = AvtonetScraperService(log);
-  // Ensure Scraper system is warmed up
-  scraper.controller;
-
+  
   final engine = ScanEngine(
     storage: storage,
     log: log,
@@ -33,7 +36,6 @@ Future<void> main() async {
 
   final catchUp = CatchUpService(
     storage: storage,
-    log: log,
     orchestrator: engine,
   );
 
@@ -43,6 +45,7 @@ Future<void> main() async {
     storage: storage,
     log: log,
     scraper: scraper,
+    catalog: catalog,
     orchestrator: engine,
     catchUp: catchUp,
     lifecycleScheduler: lifecycleScheduler,
@@ -51,7 +54,7 @@ Future<void> main() async {
   try {
     await registerBackgroundTasks();
   } catch (e) {
-    log.warning('Workmanager registration failed: $e');
+    AppLogger.error('[BACKGROUND]', 'Workmanager registration failed', e);
   }
 
   runApp(AvtonetApp(controller: controller));

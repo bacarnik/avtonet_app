@@ -25,16 +25,16 @@ abstract final class WebviewStealthConfig {
       'User-Agent': userAgent,
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
       'Accept-Language': 'sl-SI,sl;q=0.9,en-GB;q=0.8,en;q=0.7',
-      'Accept-Encoding': 'gzip, deflate, br',
       'Connection': 'keep-alive',
       'Cache-Control': 'max-age=0',
-      'Pragma': 'no-cache',
       'Upgrade-Insecure-Requests': '1',
       'Sec-Fetch-Site': 'none',
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-User': '?1',
       'Sec-Fetch-Dest': 'document',
     };
+    // Note: Accept-Encoding is omitted to let HttpClient handle gzip/deflate automatically.
+    // Adding 'br' manually would cause decoding errors in Dart HttpClient.
     if (referer != null && referer.isNotEmpty) {
       headers['Referer'] = referer;
       headers['Sec-Fetch-Site'] = 'same-origin';
