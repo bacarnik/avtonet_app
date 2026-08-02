@@ -1,8 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/car_listing.dart';
 import 'storage_service.dart';
-import '../utils/logger.dart';
 
 /// REFACTORED: Individual Listing Notification Architecture.
 class NotificationService {
@@ -81,7 +81,8 @@ class NotificationService {
       await _storage.recordNotificationSent(DateTime.now());
       return true;
     } catch (e, stack) {
-      AppLogger.error('[NOTIFICATION]', 'Send failed id=${ad.id}', e, stack);
+      debugPrint('[NOTIFICATION] [ERROR] Send failed id=${ad.id}: $e');
+      if (stack != null) debugPrint(stack.toString());
       return false;
     }
   }

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../controllers/app_controller.dart';
 import '../data/filter_options.dart';
+import '../models/avtonet_catalog_models.dart';
 import '../widgets/body_type_grid.dart';
 
 class SearchTab extends StatefulWidget {
@@ -216,25 +217,103 @@ class _SearchTabState extends State<SearchTab> {
   }
 
   Widget _makeDropdown() {
+    final brands = c.allBrands;
+
+    // 1. Define top/popular brand names
+    final topNames = [
+      'Audi',
+      'BMW',
+      'Mercedes-Benz',
+      'Renault',
+      'Škoda',
+      'Volkswagen'
+    ];
+
+    // 2. Separate top brands and the rest to avoid duplicate values
+    // Using dynamic to be safe if types are not perfectly resolved during build
+    final topBrands = [];
+    final topValues = <String>{};
+
+    for (var name in topNames) {
+      try {
+        final b = brands.firstWhere((b) => b.displayName == name);
+        topBrands.add(b);
+        topValues.add(b.value);
+      } catch (_) {}
+    }
+
+    // 3. Get remaining brands and sort them alphabetically
+    final remainingBrands = brands.where((b) => !topValues.contains(b.value)).toList();
+    remainingBrands.sort(
+      (a, b) => a.displayName.toLowerCase().compareTo(
+            b.displayName.toLowerCase(),
+          ),
+    );
+
+    final items = <DropdownMenuItem<String>>[];
+
+    // A. Initial item
+    items.add(const DropdownMenuItem(value: '', child: Text('Izberi znamko')));
+
+    // B. PRILJUBLJENE Separator
+    items.add(const DropdownMenuItem(
+      value: '---sep-fav---',
+      enabled: false,
+      child: Center(
+        child: Text(
+          '──────── PRILJUBLJENE ────────',
+          style: TextStyle(color: Colors.grey, fontSize: 12),
+        ),
+      ),
+    ));
+
+    // C. TOP BRANDS
+    for (var b in topBrands) {
+      items.add(DropdownMenuItem(
+        value: b.value,
+        child: Text(b.displayName, overflow: TextOverflow.ellipsis),
+      ));
+    }
+
+    // D. VSE ZNAMKE Separator
+    items.add(const DropdownMenuItem(
+      value: '---sep-all---',
+      enabled: false,
+      child: Center(
+        child: Text(
+          '──────── VSE ZNAMKE ────────',
+          style: TextStyle(color: Colors.grey, fontSize: 12),
+        ),
+      ),
+    ));
+
+    // E. REMAINING BRANDS (alphabetical A-Z)
+    for (var b in remainingBrands) {
+      items.add(DropdownMenuItem(
+        value: b.value,
+        child: Text(b.displayName, overflow: TextOverflow.ellipsis),
+      ));
+    }
+
     return DropdownButtonFormField<String>(
       value: c.selectedMake,
       isExpanded: true,
-      items: [
-        const DropdownMenuItem(value: '', child: Text('Vse znamke')),
-        ...c.allBrands.map((b) => DropdownMenuItem(
-              value: b.value,
-              child: Text(b.displayName, overflow: TextOverflow.ellipsis),
-            )),
-      ],
-      onChanged: c.onMakeChanged,
+      items: items,
+      onChanged: (val) {
+        if (val != null && !val.startsWith('---sep-')) {
+          c.onMakeChanged(val);
+        }
+      },
     );
   }
 
   Widget _modelDropdown() {
+    final models = c.modelsForMake(c.selectedMake);
+    
     return DropdownButtonFormField<String>(
       value: c.selectedModel,
       isExpanded: true,
-      items: ['', ...c.models]
+      items: ['', ...models]
           .map((m) => DropdownMenuItem(value: m, child: Text(m.isEmpty ? 'Vsi modeli' : m, overflow: TextOverflow.ellipsis)))
           .toList(),
       onChanged: c.isModelDropdownEnabled ? c.onModelChanged : null,

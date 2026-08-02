@@ -1,5 +1,5 @@
 import 'dart:async';
-import '../utils/logger.dart';
+import 'package:flutter/foundation.dart';
 
 typedef ScanTrigger = Future<void> Function();
 
@@ -16,11 +16,11 @@ class LifecycleScheduler {
   void start() {
     if (_isRunning) return;
     _isRunning = true;
-    AppLogger.info('[SCHEDULER]', 'Started');
+    debugPrint('[SCHEDULER] Started');
     
     // Check every minute if we need to scan
     _timer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      AppLogger.info('[SCHEDULER]', 'Tick');
+      debugPrint('[SCHEDULER] Tick');
       if (_onTick != null) {
         _onTick!();
       }

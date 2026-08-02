@@ -11,7 +11,6 @@ import '../parsers/avtonet_html_parser.dart';
 import '../utils/url_builder.dart';
 import 'log_service.dart';
 import 'webview_stealth_config.dart';
-import '../utils/logger.dart';
 
 enum ScrapeStatus {
   idle,
@@ -61,20 +60,26 @@ class AvtonetScraperService {
 
   void _initController() {
     if (kIsWeb) return;
-    controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(WebviewStealthConfig.userAgent)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) {
-            _pageLoadCompleter?.complete();
-          },
-          onWebResourceError: (error) {
-            AppLogger.error('[SCRAPER]', 'WebView resource error: ${error.description}');
-          },
-        ),
-      );
-    _ready = true;
+    try {
+      controller = WebViewController()
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..setUserAgent(WebviewStealthConfig.userAgent)
+        ..setNavigationDelegate(
+          NavigationDelegate(
+            onPageFinished: (url) {
+              _pageLoadCompleter?.complete();
+            },
+            onWebResourceError: (error) {
+              debugPrint('[SCRAPER] [ERROR] WebView resource error: ${error.description}');
+            },
+          ),
+        );
+      _ready = true;
+      debugPrint('[SCRAPER] WebView initialized successfully, _ready=true');
+    } catch (e) {
+      debugPrint('[SCRAPER] [ERROR] WebView initialization failed: $e');
+      _ready = false;
+    }
   }
 
   Future<void> _resetSession() async {
@@ -85,15 +90,46 @@ class AvtonetScraperService {
     await cookieManager.clearCookies();
   }
 
+  Future<String> fetchHtml(String url, {Duration? timeout}) async {
+    return _fetch(url, method: 'GET', timeout: timeout);
+  }
+
   Future<String> _fetch(String url, {required String method, Duration? timeout}) async {
-    if (useWebView && _ready) {
-      try {
-        return await _fetchWithWebView(url);
-      } catch (e) {
-        AppLogger.warn('[SCRAPER]', 'WebView fetch failed, falling back to HttpClient');
+    if (method == 'WORKER') {
+      debugPrint('[PAGE HEADLESS] useWebView=$useWebView ready=$_ready');
+    }
+
+    if (useWebView) {
+      if (!_ready) {
+        if (method == 'WORKER') debugPrint('[WORKER FETCH] Re-initializing WebView');
+        _initController();
+      }
+
+      if (_ready) {
+        try {
+          if (method == 'WORKER') debugPrint('[WORKER FETCH START] WebView');
+          return await _fetchWithWebView(url);
+        } catch (e) {
+          if (method == 'WORKER') {
+            debugPrint('[WORKER FETCH FAILED] WebView error: $e');
+          } else {
+            debugPrint('[SCRAPER] [WARN] WebView fetch failed, falling back to HttpClient: $e');
+          }
+        }
+      } else {
+        if (method == 'WORKER') debugPrint('[WORKER FETCH] WebView NOT READY after init');
       }
     }
-    return await _fetchSimple(url, timeout: timeout);
+    
+    if (method == 'WORKER') debugPrint('[WORKER FETCH START] HttpClient');
+    try {
+      final html = await _fetchSimple(url, timeout: timeout);
+      if (method == 'WORKER') debugPrint('[WORKER FETCH SUCCESS] HttpClient');
+      return html;
+    } catch (e) {
+      if (method == 'WORKER') debugPrint('[WORKER FETCH FAILED] HttpClient: $e');
+      rethrow;
+    }
   }
 
   Future<String> _fetchSimple(String url, {Duration? timeout}) async {
@@ -110,7 +146,7 @@ class AvtonetScraperService {
 
       if (statusCode == 301 || statusCode == 302) {
         final location = response.headers.value('location');
-        AppLogger.warn('[SCRAPER]', 'HTTP Redirect to: $location');
+        debugPrint('[SCRAPER] [WARN] HTTP Redirect to: $location');
       }
 
       final html = await response.transform(utf8.decoder).join();
@@ -143,16 +179,30 @@ class AvtonetScraperService {
     try {
       await _pageLoadCompleter!.future.timeout(WebviewStealthConfig.pageLoadTimeout);
       
-      bool containersFound = false;
-      for (int i = 0; i < 10; i++) {
-        final check = await controller.runJavaScriptReturningResult(
-          "document.querySelectorAll('div.GO-Results-Row, div.GO-Results-Top-Ponudba, .GO-Results-Main').length > 0"
-        );
-        if (check == true) {
-          containersFound = true;
-          break;
+      if (url.contains('search.asp')) {
+        // Robust wait for models to populate (jQuery.chained)
+        for (int i = 0; i < 20; i++) {
+          try {
+            final result = await controller.runJavaScriptReturningResult(
+              "document.querySelectorAll('#model option').length"
+            );
+            final count = int.tryParse(result.toString()) ?? 0;
+            if (count > 1) break;
+          } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 500));
         }
-        await Future.delayed(const Duration(seconds: 1));
+      } else {
+        bool containersFound = false;
+        for (int i = 0; i < 10; i++) {
+          final check = await controller.runJavaScriptReturningResult(
+            "document.querySelectorAll('div.GO-Results-Row, div.GO-Results-Top-Ponudba, .GO-Results-Main').length > 0"
+          );
+          if (check == true) {
+            containersFound = true;
+            break;
+          }
+          await Future.delayed(const Duration(seconds: 1));
+        }
       }
 
       final html = await controller.runJavaScriptReturningResult('document.documentElement.outerHTML') as String;
@@ -165,6 +215,16 @@ class AvtonetScraperService {
       return decodedHtml;
     } catch (e) {
       rethrow;
+    }
+  }
+
+  Future<void> dispose() async {
+    if (_ready) {
+      try {
+        // Clear delegates to avoid Pigeon errors after disposal
+        await controller.setNavigationDelegate(NavigationDelegate());
+        await controller.setJavaScriptMode(JavaScriptMode.disabled);
+      } catch (_) {}
     }
   }
 
@@ -216,7 +276,7 @@ class AvtonetScraperService {
                 rethrow;
               } catch (e) {
                 if (retry == 3) throw e;
-                AppLogger.warn('[SCRAPER]', 'Page 1 retry $retry/3 due to error: $e');
+                debugPrint('[SCRAPER] [WARN] Page 1 retry $retry/3 due to error: $e');
                 await Future.delayed(const Duration(seconds: 2));
               }
             }
@@ -303,7 +363,8 @@ class AvtonetScraperService {
       return ScrapeResult.success(allNewListings, pages: totalPages, totalFound: totalChecked);
 
     } catch (e, stack) {
-      AppLogger.error('[SCRAPER]', 'Scrape exception for config ${config.name}', e, stack);
+      debugPrint('[SCRAPER] [ERROR] Scrape exception for config ${config.name}: $e');
+      if (stack != null) debugPrint(stack.toString());
       return ScrapeResult.failure(e.toString());
     }
   }

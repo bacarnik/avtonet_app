@@ -1,26 +1,30 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' show parse;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/avtonet_catalog_models.dart';
-import 'webview_stealth_config.dart';
-import '../utils/logger.dart';
+import 'avtonet_scraper_service.dart';
 
 class AvtonetCatalogService {
+  AvtonetCatalogService(this._scraper);
+
+  final AvtonetScraperService _scraper;
+
   static const String _keyCatalog = 'avtonet_catalog_v3';
   static const String _searchUrl = 'https://www.avto.net/Ads/search.asp?SID=10000';
 
   AvtonetCatalogData? _cachedCatalog;
 
   Future<AvtonetCatalogData?> getCatalog({bool forceRefresh = false}) async {
-    if (!forceRefresh && _cachedCatalog != null) return _cachedCatalog;
+    if (!forceRefresh && _cachedCatalog != null) {
+      return _cachedCatalog;
+    }
 
     if (!forceRefresh) {
       final local = await _loadFromLocal();
       if (local != null) {
         final age = DateTime.now().difference(local.lastUpdated);
-        if (age.inDays < 7) {
+        if (age.inDays < 7 && local.brands.isNotEmpty) {
           _cachedCatalog = local;
           return local;
         }
@@ -29,45 +33,41 @@ class AvtonetCatalogService {
 
     try {
       final html = await _fetchSearchPage();
-      if (html == null) throw Exception('Failed to fetch search page');
+      
+      if (html != null && html.isNotEmpty) {
+        final data = await compute(_parseCatalogInBackground, html);
 
-      final data = await compute(_parseCatalogInBackground, html);
-      if (data.brands.isNotEmpty) {
-        await _saveToLocal(data);
-        _cachedCatalog = data;
-        AppLogger.info('[CATALOG]', 'Catalog updated (${data.brands.length} brands)');
-        return data;
+        if (data.brands.isNotEmpty) {
+          await _saveToLocal(data);
+          _cachedCatalog = data;
+          debugPrint('[INFO] Avtonet catalog updated from network (${data.brands.length} brands)');
+          return data;
+        }
       }
     } catch (e) {
-      AppLogger.warn('[CATALOG]', 'Failed to refresh catalog: $e');
-      final fallback = _cachedCatalog ?? await _loadFromLocal();
-      return fallback;
+      debugPrint('[ERROR] Catalog refresh failed: $e');
     }
-    return null;
+
+    final fallback = _cachedCatalog ?? await _loadFromLocal();
+    return fallback;
   }
 
   Future<String?> _fetchSearchPage() async {
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 15);
     try {
-      final request = await client.getUrl(Uri.parse(_searchUrl));
-      WebviewStealthConfig.navigationHeaders().forEach((k, v) => request.headers.set(k, v));
-      
-      final response = await request.close().timeout(const Duration(seconds: 20));
-      if (response.statusCode != 200) return null;
-
-      final html = await response.transform(utf8.decoder).join();
-      return html;
+      return await _scraper.fetchHtml(_searchUrl);
     } catch (e) {
+      debugPrint('[ERROR] Catalog fetch failed: $e');
       return null;
-    } finally {
-      client.close();
     }
   }
 
   Future<void> _saveToLocal(AvtonetCatalogData data) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_keyCatalog, jsonEncode(data.toJson()));
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyCatalog, jsonEncode(data.toJson()));
+    } catch (e) {
+      debugPrint('[ERROR] Failed to save catalog: $e');
+    }
   }
 
   Future<AvtonetCatalogData?> _loadFromLocal() async {
@@ -84,15 +84,25 @@ class AvtonetCatalogService {
 
 AvtonetCatalogData _parseCatalogInBackground(String html) {
   final doc = parse(html);
-  
+
   final List<AvtonetBrand> brands = [];
-  final makeSelect = doc.querySelector('select[name="znamka"]');
+  final makeSelect = doc.querySelector('select[name="znamka"]') ?? 
+                     doc.querySelector('select#znamka') ??
+                     doc.querySelector('select[name*="znamka"]');
+
   if (makeSelect != null) {
     final options = makeSelect.querySelectorAll('option');
+    
     for (final opt in options) {
       final value = opt.attributes['value'] ?? '';
-      final displayName = opt.text.trim();
-      if (value.isEmpty || opt.attributes.containsKey('disabled') || displayName.startsWith('-')) continue;
+      final displayName = opt.text.replaceAll('\u00A0', ' ').trim();
+      
+      if (value.isEmpty || 
+          opt.attributes.containsKey('disabled') || 
+          displayName.startsWith('-') ||
+          displayName.contains('izberi') ||
+          displayName.toLowerCase().contains('vse znamke')) continue;
+      
       if (brands.any((b) => b.value == value)) continue;
       
       brands.add(AvtonetBrand(
@@ -104,19 +114,29 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
   }
 
   final Map<String, List<AvtonetModel>> modelsByBrand = {};
-  final modelSelect = doc.querySelector('select[id="model"]');
+  // More robust selector for models
+  final modelSelect = doc.querySelector('#model') ?? 
+                      doc.querySelector('select[name="model"]');
+
   if (modelSelect != null) {
     final options = modelSelect.querySelectorAll('option');
+    debugPrint('[MODELS] Found ${options.length} options in model select');
+
     for (final opt in options) {
       final value = opt.attributes['value'] ?? '';
-      final className = opt.attributes['class'] ?? '';
-      if (value.isEmpty || className.isEmpty || value == 'modela ni na seznamu') continue;
-
-      final brandKey = className.replaceAll(' vsi', '').trim();
+      // Avto.net uses brand name in class attribute for model options
+      final brandKeyRaw = opt.attributes['class'] ?? ''; 
       
+      if (value.isEmpty || brandKeyRaw.isEmpty || 
+          value == 'modela ni na seznamu' || 
+          opt.text.toLowerCase().contains('izberite model')) continue;
+
+      // Robust key normalization for cross-isolate matching
+      final brandKey = _normalizeKey(brandKeyRaw);
+
       final rawText = opt.text;
       final isIndented = rawText.startsWith('\u00A0') || rawText.startsWith(' ');
-      final isGroup = className.contains('vsi') || value.endsWith(' (vsi)');
+      final isGroup = brandKeyRaw.toLowerCase().contains('vsi') || value.endsWith(' (vsi)');
 
       String displayName = rawText.replaceAll('\u00A0', '').trim();
       String searchValue = '';
@@ -139,11 +159,6 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
           modelId = value;
         }
       }
-      
-      final fooId = opt.attributes['foo'];
-      if (fooId != null && fooId.isNotEmpty) {
-        modelId = fooId;
-      }
 
       final model = AvtonetModel(
         displayName: displayName,
@@ -156,9 +171,20 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
     }
   }
 
+  debugPrint('[INFO] Parsed ${brands.length} brands and ${modelsByBrand.length} model groups');
   return AvtonetCatalogData(
     brands: brands,
     modelsByBrand: modelsByBrand,
     lastUpdated: DateTime.now(),
   );
+}
+
+/// Centralized key normalization for brand matching.
+String _normalizeKey(String key) {
+  return key.toLowerCase()
+      .replaceAll('znamka_', '') // Handle "znamka_24" format if used
+      .replaceAll('š', 's').replaceAll('č', 'c').replaceAll('ž', 'z')
+      .replaceAll('ć', 'c').replaceAll('đ', 'd')
+      .replaceAll(RegExp(r'[^a-z0-9]'), '')
+      .trim();
 }

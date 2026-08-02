@@ -1,8 +1,8 @@
+import 'package:flutter/foundation.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import 'scan_orchestrator.dart';
 import 'storage_service.dart';
-import '../utils/logger.dart';
 
 class CatchUpService {
   CatchUpService({
@@ -36,7 +36,7 @@ class CatchUpService {
     final gapMin = await offlineGapMinutes();
     if (gapMin < scanIntervalMinutes) return null;
 
-    AppLogger.info('[SCAN]', 'Offline gap detected: ${gapMin ~/ 60} h ${gapMin % 60} min. Triggering catch-up.');
+    debugPrint('[SCAN] Offline gap detected: ${gapMin ~/ 60} h ${gapMin % 60} min. Triggering catch-up.');
 
     return _orchestrator.scan(
       searches: searches,

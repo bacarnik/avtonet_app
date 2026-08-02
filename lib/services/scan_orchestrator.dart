@@ -6,7 +6,6 @@ import 'filter_matcher.dart';
 import 'log_service.dart';
 import 'notification_service.dart';
 import 'storage_service.dart';
-import '../utils/logger.dart';
 
 class ScanEngineResult {
   const ScanEngineResult({
@@ -62,11 +61,11 @@ class ScanEngine {
     final method = ownerOverride ?? (isAuto ? 'AUTO' : 'MANUAL');
     final stopwatch = Stopwatch()..start();
 
-    AppLogger.info('[SCAN]', 'Started (owner: $method)');
+    debugPrint('[SCAN] Started (owner: $method)');
     
     if (!await _storage.acquireScanLock(method)) {
-      AppLogger.warn('[SCAN]', 'Blocked by lock ($method)');
-      AppLogger.info('[SCAN]', 'Failed (Lock active)');
+      debugPrint('[SCAN] [WARN] Blocked by lock ($method)');
+      debugPrint('[SCAN] Failed (Lock active)');
       return ScanEngineResult(
         ok: false,
         successCount: 0,
@@ -106,7 +105,7 @@ class ScanEngine {
 
       for (var i = 0; i < slotsToScan.length; i++) {
         if (_cancelRequested) {
-          AppLogger.info('[SCAN]', 'Cancelled by user');
+          debugPrint('[SCAN] Cancelled by user');
           break;
         }
 
@@ -114,7 +113,7 @@ class ScanEngine {
         final config = updatedConfigs[configIndex];
         
         onProgress(i + 1, slotsToScan.length, config.name, 'Skeniranje...');
-        AppLogger.info('[SCRAPER]', config.name);
+        debugPrint('[SCRAPER] ${config.name}');
 
         try {
           final result = await _scraper.scrapeSearchUrl(config, method: method, seenIds: seenIds.toList());
@@ -137,7 +136,7 @@ class ScanEngine {
             }
 
             totalNewFound += matched.length;
-            AppLogger.info('[SCRAPER]', '${matched.length} new ads');
+            debugPrint('[SCRAPER] ${matched.length} new ads');
             
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
@@ -172,7 +171,7 @@ class ScanEngine {
             }
           } else {
             failCount++;
-            AppLogger.warn('[SCRAPER]', '${config.name} failed: ${result.status.name}');
+            debugPrint('[SCRAPER] [WARN] ${config.name} failed: ${result.status.name}');
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
               lastStatus: 'Napaka: ${result.status.name}',
@@ -188,9 +187,9 @@ class ScanEngine {
                await _notifications.notifyError('Napaka v omrežju ali Timeout');
             }
           }
-          await _storage.saveSearches(updatedConfigs);
         } catch (e, stack) {
-          AppLogger.error('[SCRAPER]', 'Loop exception for ${config.name}', e, stack);
+          debugPrint('[SCRAPER] [ERROR] Loop exception for ${config.name}: $e');
+          if (stack != null) debugPrint(stack.toString());
           failCount++;
           updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
             lastChecked: DateTime.now(),
@@ -199,9 +198,12 @@ class ScanEngine {
         }
       }
 
+      // Batch save all updated configs after the loop finishes
+      await _storage.saveSearches(updatedConfigs);
+
       stopwatch.stop();
-      AppLogger.info('[NOTIFICATION]', '$notificationsSent notifications shown');
-      AppLogger.info('[SCAN]', 'Finished in ${stopwatch.elapsed.inSeconds}s. Total new ads: $totalNewFound');
+      debugPrint('[NOTIFICATION] $notificationsSent notifications shown');
+      debugPrint('[SCAN] Finished in ${stopwatch.elapsed.inSeconds}s. Total new ads: $totalNewFound');
 
       return ScanEngineResult(
         ok: !criticalFailure && failCount < slotsToScan.length,
@@ -213,8 +215,9 @@ class ScanEngine {
         error: globalError,
       );
     } catch (e, stack) {
-      AppLogger.error('[SCAN]', 'Critical error during scan', e, stack);
-      AppLogger.info('[SCAN]', 'Failed (Exception)');
+      debugPrint('[SCAN] [ERROR] Critical error during scan: $e');
+      if (stack != null) debugPrint(stack.toString());
+      debugPrint('[SCAN] Failed (Exception)');
       rethrow;
     } finally {
       await _storage.releaseScanLock();
