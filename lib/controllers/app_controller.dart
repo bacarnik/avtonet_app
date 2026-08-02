@@ -15,7 +15,6 @@ import '../services/log_service.dart';
 import '../services/scan_orchestrator.dart';
 import '../services/storage_service.dart';
 import '../background/workmanager_entrypoint.dart';
-import '../utils/logger.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
@@ -83,14 +82,48 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   String? mocMinText;
   String? mocMaxText;
 
-  List<AvtonetBrand> get allBrands => _catalog?.brands ?? [];
+  List<AvtonetBrand> get allBrands {
+    return _catalog?.brands ?? [];
+  }
+
   List<String> get makes => allBrands.map((b) => b.displayName).toList();
   List<AvtonetModel> get availableModels => _catalog?.modelsByBrand[selectedMake] ?? [];
   List<String> get models => availableModels.map((m) => m.displayName).toList();
   bool get isModelDropdownEnabled => selectedMake.isNotEmpty;
 
   List<String> modelsForMake(String makeValue) {
-    return _catalog?.modelsByBrand[makeValue]?.map((m) => m.displayName).toList() ?? [];
+    if (_catalog == null || makeValue.isEmpty) {
+      return [];
+    }
+    
+    // Normalize requested value (might be ID or name)
+    final normMake = _normalizeKey(makeValue);
+    
+    // 1. Try to find by normalized key directly
+    var list = _catalog!.modelsByBrand[normMake];
+    
+    // 2. If no direct match, try to find the brand by ID first, then use its name
+    if (list == null || list.isEmpty) {
+      try {
+        final brand = allBrands.firstWhere(
+          (b) => b.value == makeValue || _normalizeKey(b.displayName) == normMake,
+          orElse: () => AvtonetBrand(displayName: '', value: ''),
+        );
+        if (brand.displayName.isNotEmpty) {
+          list = _catalog!.modelsByBrand[_normalizeKey(brand.displayName)];
+        }
+      } catch (_) {}
+    }
+    
+    return list?.map((m) => m.displayName).toList() ?? [];
+  }
+
+  /// Centralized key normalization for brand matching.
+  String _normalizeKey(String key) {
+    return key.toLowerCase().trim()
+        .replaceAll('š', 's').replaceAll('č', 'c').replaceAll('ž', 'z')
+        .replaceAll('ć', 'c').replaceAll('đ', 'd')
+        .replaceAll(RegExp(r'[^a-z0-9]'), '');
   }
 
   bool get initialized => _initialized;
@@ -115,6 +148,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
     await _log.loadPersisted();
     _catalog = await _catalogService.getCatalog();
+    
     savedSearches = await _storage.loadSearches();
     savedListings = await _storage.loadListings();
     historyFilter = await _storage.loadHistoryFilter();
@@ -133,7 +167,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     
     final needsScan = await _storage.consumePendingBackgroundScan();
     if (needsScan) {
-      AppLogger.info('[PENDING]', 'Starting catch-up scan');
       runSequentialScan();
     }
   }
@@ -148,7 +181,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     // Trigger every 15 minutes (00, 15, 30, 45)
     if (now.minute % 15 == 0 && now.minute != _lastTriggerMinute) {
       _lastTriggerMinute = now.minute;
-      AppLogger.info('[SCHEDULER]', 'Triggering scan');
+      debugPrint('[SCHEDULER] Triggering scan');
       runSequentialScan();
     }
   }
@@ -180,7 +213,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     
     if (_nextScanTime != next) {
       _nextScanTime = next;
-      AppLogger.info('[SCHEDULER]', 'Next scan ${next.hour}:${next.minute.toString().padLeft(2, '0')}');
+      debugPrint('[SCHEDULER] Next scan ${next.hour}:${next.minute.toString().padLeft(2, '0')}');
     }
     notifyListeners();
   }
@@ -196,7 +229,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final needsScan = await _storage.consumePendingBackgroundScan();
     if (needsScan) {
       if (!_isScanning) {
-        AppLogger.info('[PENDING]', 'Starting catch-up scan');
+        debugPrint('[PENDING] Starting catch-up scan');
         runSequentialScan();
       } else {
         await _storage.setPendingBackgroundScan(true);
@@ -416,5 +449,11 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return csv.split(',').map((e) => int.tryParse(e)).where((e) => e != null).map((c) => kBodyTypes.firstWhere((b) => b.code == c, orElse: () => kBodyTypes.first).label).join(', ');
   }
 
-  @override void dispose() { WidgetsBinding.instance.removeObserver(this); _lifecycleScheduler.dispose(); super.dispose(); }
+  @override 
+  void dispose() { 
+    WidgetsBinding.instance.removeObserver(this); 
+    _lifecycleScheduler.dispose(); 
+    _scraper.dispose(); // CRITICAL: Clean up WebView resources
+    super.dispose(); 
+  }
 }

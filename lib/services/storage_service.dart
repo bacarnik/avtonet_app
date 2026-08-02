@@ -1,9 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
 import '../models/history_filter.dart';
 import '../models/scheduler_event.dart';
-import '../utils/logger.dart';
 
 class StorageService {
   static const keySearches = 'saved_searches_v5';
@@ -44,6 +44,7 @@ class StorageService {
 
   Future<List<SearchConfig>> loadSearches() async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload(); // Ensure fresh data across isolates
     return SearchConfig.listFromJsonString(prefs.getString(keySearches) ?? '');
   }
 
@@ -54,6 +55,7 @@ class StorageService {
 
   Future<List<CarListing>> loadListings() async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload(); // Ensure fresh data across isolates
     return CarListing.listFromJsonString(prefs.getString(keyListings) ?? '');
   }
 
@@ -101,6 +103,7 @@ class StorageService {
 
   Future<bool> acquireScanLock(String owner) async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload(); // Critical for Background Isolate to see released lock
     final isLocked = prefs.getBool('scan_lock_active') ?? false;
     final now = DateTime.now().millisecondsSinceEpoch;
 
@@ -109,7 +112,7 @@ class StorageService {
       if (now - lockTime < 10 * 60 * 1000) {
         return false;
       } else {
-        AppLogger.warn('[SCAN]', 'Stale lock detected, overriding (Owner: $owner)');
+        debugPrint('[SCAN] [WARN] Stale lock detected, overriding (Owner: $owner)');
       }
     }
     

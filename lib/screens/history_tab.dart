@@ -118,12 +118,15 @@ class _HistoryTabState extends State<HistoryTab> {
               Expanded(
                 child: DropdownButtonFormField<String>(
                   isExpanded: true,
-                  value: hf.make.isEmpty ? null : hf.make,
+                  value: hf.make.isEmpty ? '' : hf.make,
                   decoration: const InputDecoration(labelText: 'Znamka', isDense: true),
-                  items: widget.controller.makes.map((m) => DropdownMenuItem<String>(
-                    value: m, 
-                    child: Text(m.isEmpty ? 'Vse' : m, overflow: TextOverflow.ellipsis)
-                  )).toList(),
+                  items: [
+                    const DropdownMenuItem<String>(value: '', child: Text('Vse')),
+                    ...widget.controller.makes.map((m) => DropdownMenuItem<String>(
+                      value: m, 
+                      child: Text(m, overflow: TextOverflow.ellipsis)
+                    )),
+                  ],
                   onChanged: (v) => _updateFilter(hf.copyWith(make: v ?? '', model: '')),
                 ),
               ),
