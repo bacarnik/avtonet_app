@@ -28,31 +28,35 @@ class AvtonetHtmlParser {
     int totalI = 0;
 
     try {
-      // 1. Detect Next Page Button
-      final nextEl = doc.querySelector('a.page-link[aria-label="Next"], a.page-link i.fa-chevron-right');
-      if (nextEl != null) {
-        hasNext = true;
-      } else {
-        // Fallback for next page
-        final allLinks = doc.querySelectorAll('a.page-link');
-        for (final link in allLinks) {
-          if (link.text.contains('Naslednja') || link.innerHtml.contains('fa-chevron-right')) {
-            hasNext = true;
-            break;
-          }
+      // 1. Detect Next Page Button - excluding disabled links
+      final nextLinks = doc.querySelectorAll('a.page-link:not(.disabled)');
+      for (final link in nextLinks) {
+        // Double check parent <li> for 'disabled' class (Bootstrap standard)
+        final bool isParentDisabled = link.parent?.classes.contains('disabled') ?? false;
+        if (isParentDisabled) continue;
+
+        final ariaLabel = link.attributes['aria-label']?.toLowerCase() ?? '';
+        final text = link.text.toLowerCase();
+        
+        if (ariaLabel == 'next' || 
+            text.contains('naslednja') || 
+            link.querySelector('i.fa-chevron-right') != null) {
+          hasNext = true;
+          break;
         }
       }
 
-      // 2. Detect Current and Total Pages from pagination text "Stran 1 od 10" or similar
+      // 2. Detect Current and Total Pages from pagination text "Stran 1 od 10"
+      // Added support for \u00A0 (&nbsp;) which often appears in Release APK HTML
       final paginationText = doc.querySelector('.pagination, .pagination-container')?.text ?? '';
-      final pageMatch = RegExp(r'Stran\s+(\d+)\s+od\s+(\d+)', caseSensitive: false).firstMatch(paginationText);
+      final pageMatch = RegExp(r'Stran[\s\u00A0]+(\d+)[\s\u00A0]+od[\s\u00A0]+(\d+)', caseSensitive: false).firstMatch(paginationText);
       if (pageMatch != null) {
         current = int.tryParse(pageMatch.group(1)!) ?? 1;
         totalP = int.tryParse(pageMatch.group(2)!) ?? 1;
       }
 
       // 3. Detect total items "Število najdenih oglasov: 123"
-      final itemsMatch = RegExp(r'najdenih oglasov:\s*(\d+)', caseSensitive: false).firstMatch(doc.body?.text ?? '');
+      final itemsMatch = RegExp(r'najdenih oglasov:[\s\u00A0]*(\d+)', caseSensitive: false).firstMatch(doc.body?.text ?? '');
       if (itemsMatch != null) {
         totalI = int.tryParse(itemsMatch.group(1)!) ?? 0;
       }
@@ -88,7 +92,7 @@ class AvtonetHtmlParser {
     String brand = '',
     String model = '',
     String url = '',
-    List<String> seenIds = const [], // ADDED: For dynamic "new" detection logging
+    List<String> seenIds = const [] ?? const [],
   }) {
     if (isCloudflareChallenge(html)) return [];
 
@@ -141,8 +145,6 @@ class AvtonetHtmlParser {
 
         if (seenIdsInBatch.contains(id)) continue;
         seenIdsInBatch.add(id);
-
-        final bool isNewListing = !seenIds.contains(id);
 
         final priceEl = element.querySelector('.GO-Results-Row-PRICE, .Price, .price, .ResultRowPrice');
         String price = priceEl?.text.trim() ?? '';

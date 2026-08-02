@@ -246,17 +246,19 @@ class AvtonetScraperService {
     final List<CarListing> allNewListings = [];
     int totalChecked = 0;
     int totalPages = 0;
-    int consecutivePageFailures = 0;
-    const int maxConsecutivePageFailures = 3;
     final Set<String> seenInThisScan = {};
     
+    int consecutiveSeen = 0;
+    const int earlyStopThreshold = 15;
     String stopReason = 'Unknown';
 
     try {
       final String baseUrl = buildAvtonetResultsUrl(config);
+      debugPrint('[SCRAPER] Starting forensic scan for: ${config.name}');
+      debugPrint('[SCRAPER] URL: $baseUrl');
 
       pageLoop:
-      for (int page = 1; page <= 50; page++) {
+      for (int page = 1; page <= 21; page++) {
         String pageUrl = baseUrl;
         if (pageUrl.contains('stran=')) {
           pageUrl = pageUrl.replaceFirst(RegExp(r'stran=\d+'), 'stran=$page');
@@ -264,48 +266,37 @@ class AvtonetScraperService {
           pageUrl = '$pageUrl&stran=$page';
         }
         
+        debugPrint('[SCRAPER] Fetching Page $page: $pageUrl');
+        
         String? html;
-        try {
-          if (page == 1) {
-            for (int retry = 0; retry <= 3; retry++) {
-              try {
-                html = await _fetch(pageUrl, method: method);
-                consecutivePageFailures = 0;
-                break;
-              } on CloudflareBlockedException {
-                rethrow;
-              } catch (e) {
-                if (retry == 3) throw e;
-                debugPrint('[SCRAPER] [WARN] Page 1 retry $retry/3 due to error: $e');
-                await Future.delayed(const Duration(seconds: 2));
-              }
-            }
-          } else {
+        // Retry logic for any page
+        for (int retry = 0; retry <= 2; retry++) {
+          try {
             html = await _fetch(pageUrl, method: method);
-            consecutivePageFailures = 0;
-          }
-        } on CloudflareBlockedException {
-          return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
-        } catch (e) {
-          consecutivePageFailures++;
-          final errStr = e.toString().toLowerCase();
-          
-          if (errStr.contains('403') || errStr.contains('cloudflare')) {
+            break; // Success
+          } on CloudflareBlockedException {
+            debugPrint('[SCRAPER] [ERROR] Cloudflare blocked Page $page');
             return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
+          } catch (e) {
+            final errStr = e.toString().toLowerCase();
+            if (errStr.contains('403') || errStr.contains('cloudflare')) {
+              debugPrint('[SCRAPER] [ERROR] 403/Cloudflare Page $page');
+              return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
+            }
+            if (retry == 2) {
+              debugPrint('[SCRAPER] [ERROR] Network error Page $page: $e');
+              return ScrapeResult.failure('Network error: $e', status: ScrapeStatus.networkError);
+            }
+            debugPrint('[SCRAPER] [WARN] Page $page retry $retry/2: $e');
+            await Future.delayed(Duration(seconds: 2 * (retry + 1)));
           }
-          
-          if (page == 1) {
-             return ScrapeResult.failure('Page 1 network error: $e', status: ScrapeStatus.networkError);
-          }
-
-          if (consecutivePageFailures >= maxConsecutivePageFailures) {
-            stopReason = 'Too many consecutive page failures';
-            break pageLoop;
-          }
-          continue pageLoop;
         }
 
-        if (html == null) continue;
+        if (html == null || html.isEmpty) {
+          debugPrint('[SCRAPER] Page $page returned empty HTML');
+          stopReason = 'Empty HTML on page $page';
+          break pageLoop;
+        }
 
         final List<CarListing> pageListings = await compute(_parseListingsInBackground, {
           'html': html,
@@ -314,14 +305,13 @@ class AvtonetScraperService {
         });
 
         final pagination = await compute(_parsePaginationInBackground, html);
+        debugPrint('[SCRAPER] Page $page results: ${pageListings.length} items. Pagination: $pagination');
         
         if (pageListings.isEmpty) {
+          debugPrint('[SCRAPER] Stop: No listings on Page $page');
           stopReason = 'Zero listings on page $page';
           break pageLoop;
         }
-
-        int consecutiveSeen = 0;
-        const int earlyStopThreshold = 15;
 
         for (var listing in pageListings) {
           if (!seenInThisScan.add(listing.id)) continue;
@@ -337,6 +327,7 @@ class AvtonetScraperService {
           }
 
           if (consecutiveSeen >= earlyStopThreshold) {
+            debugPrint('[SCRAPER] Stop: Reached early-stop threshold (known ads)');
             stopReason = 'Early stop (known ads)';
             break pageLoop;
           }
@@ -344,22 +335,26 @@ class AvtonetScraperService {
 
         totalPages++;
 
-        if (pageListings.length < 48) {
-          stopReason = 'Last page reached';
+        if (pageListings.length < 10) { 
+          debugPrint('[SCRAPER] Stop: Page $page has < 10 items, assuming last page.');
+          stopReason = 'Last page reached (small count)';
           break pageLoop;
         }
 
         if (!pagination.hasNext) {
+          debugPrint('[SCRAPER] Stop: Pagination hasNext = false');
           stopReason = 'No next page';
           break pageLoop;
         }
 
         if (pagination.totalPages > 1 && page >= pagination.totalPages) {
+          debugPrint('[SCRAPER] Stop: Reached pagination limit ($page/${pagination.totalPages})');
           stopReason = 'Reached pagination limit';
           break pageLoop;
         }
       }
 
+      debugPrint('[SCRAPER] Forensic scan finished. Total pages: $totalPages, Total items: $totalChecked, Reason: $stopReason');
       return ScrapeResult.success(allNewListings, pages: totalPages, totalFound: totalChecked);
 
     } catch (e, stack) {
