@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import '../models/search_config.dart';
 import '../data/filter_options.dart';
 
@@ -18,17 +19,32 @@ int? _normalizePower(int? value, String unit) {
 
 /// REFACTORED: Uses CP1250 encoding for Avto.net parameters.
 String buildAvtonetResultsUrl(SearchConfig config) {
+  debugPrint('[FORENSIC] URL BUILDER START');
+  debugPrint('[FORENSIC] filter.brand: ${config.znamka}');
+  debugPrint('[FORENSIC] filter.model (display): ${config.model}');
+  debugPrint('[FORENSIC] filter.modelId: ${config.modelId}');
+  debugPrint('[FORENSIC] filter.modelSearchValue: ${config.modelSearchValue}');
+
   final String eq7 = _eq7ForTransmission(config.menjalnik) ?? '1110100120';
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
 
+  // Logic to determine the correct 'model' parameter value
+  // If we have a specific model ID, use it. 
+  // Otherwise, use the modelSearchValue (which for BMW Serija 1 should be 'Serija 1:')
+  String modelValue = '';
+  if (config.modelId != null && config.modelId!.isNotEmpty) {
+    modelValue = config.modelId!;
+  } else if (config.modelSearchValue.isNotEmpty) {
+    modelValue = config.modelSearchValue;
+  }
+
   // Use the raw values from config, but we will encode them later.
   final params = <String, String>{
     'znamka': config.znamka,
-    'model': config.modelSearchValue.isNotEmpty ? '' : (config.modelId ?? ''), 
-    'SUBmodelsearch': config.modelSearchValue,
+    'model': modelValue, 
+    'SUBmodelsearch': '', // Only used for manual text entry
     'SUBmodgrp1': config.subModelGroup ?? '0',
-    'tip': 'katerikoli tip',
     'cenaMin': '${config.cenaMin ?? 0}',
     'cenaMax': '${config.cenaMax ?? 999999}',
     'letnikMin': '${config.letnikMin ?? 0}',
@@ -57,15 +73,11 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'stran': '1',
   };
 
-  if (params['SUBmodelsearch']!.isNotEmpty) {
-    params['model'] = '';
-  }
-
-  if (params['model'] == '' && params['SUBmodelsearch'] == '') {
-    params.remove('model');
-  }
+  if (params['model'] == '') params.remove('model');
   if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
   if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
+
+  debugPrint('[FORENSIC] generated queryParameters: $params');
 
   return _buildFromMap(params);
 }

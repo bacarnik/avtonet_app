@@ -31,6 +31,7 @@ class StorageService {
   static const keyLastNotificationAt = 'last_notification_at';
   static const keyLastWorkerRegistration = 'last_worker_registration_at';
   static const keyLastWorkerResult = 'last_worker_result_status';
+  static const keyAppForeground = 'app_is_in_foreground_v1';
 
   // Extended Diagnostics
   static const keyWorkerLastSuccessAt = 'worker_last_success_at';
@@ -109,7 +110,8 @@ class StorageService {
 
     if (isLocked) {
       final lockTime = prefs.getInt('scan_lock_time') ?? 0;
-      if (now - lockTime < 10 * 60 * 1000) {
+      // Stale lock: 5 minutes is enough for background scan
+      if (now - lockTime < 5 * 60 * 1000) {
         return false;
       } else {
         debugPrint('[SCAN] [WARN] Stale lock detected, overriding (Owner: $owner)');
@@ -269,6 +271,17 @@ class StorageService {
   Future<void> recordNotificationSent(DateTime time) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(keyLastNotificationAt, time.millisecondsSinceEpoch);
+  }
+
+  Future<void> setAppForeground(bool foreground) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(keyAppForeground, foreground);
+  }
+
+  Future<bool> isAppForeground() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    return prefs.getBool(keyAppForeground) ?? false;
   }
 
   Future<Map<String, dynamic>> getWorkerDiagnostics() async {

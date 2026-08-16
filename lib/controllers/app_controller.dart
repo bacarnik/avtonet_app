@@ -141,6 +141,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     WidgetsBinding.instance.addObserver(this);
     
+    // Set initial foreground state
+    await _storage.setAppForeground(true);
+
     if (_initialized) {
       _lifecycleScheduler.start();
       return;
@@ -181,8 +184,19 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     // Trigger every 15 minutes (00, 15, 30, 45)
     if (now.minute % 15 == 0 && now.minute != _lastTriggerMinute) {
       _lastTriggerMinute = now.minute;
-      debugPrint('[SCHEDULER] Triggering scan');
-      runSequentialScan();
+      
+      // Check if last successful scan was recent (within 13 mins) to avoid redundant scans
+      _storage.getLastSuccessfulScan().then((lastScan) {
+        if (lastScan != null) {
+          final diff = now.difference(lastScan).inMinutes;
+          if (diff < 14) {
+             debugPrint('[SCHEDULER] Skipping scan, last success was $diff mins ago');
+             return;
+          }
+        }
+        debugPrint('[SCHEDULER] Triggering scan');
+        runSequentialScan();
+      });
     }
   }
 
@@ -221,7 +235,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _storage.setAppForeground(true);
       _checkPendingScan();
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _storage.setAppForeground(false);
     }
   }
 
@@ -336,22 +353,34 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> runSequentialScan({bool forceAll = false, String? singleId}) async {
     if (_isScanning) return;
     
-    List<SearchConfig> configsToPass;
-    if (singleId != null) {
-      configsToPass = savedSearches.where((s) => s.id == singleId).toList();
-    } else if (forceAll) {
-      configsToPass = savedSearches;
-    } else {
-      configsToPass = savedSearches.where((s) => s.isEnabled).toList();
-    }
-    
-    if (configsToPass.isEmpty) return;
-    
-    _isScanning = true; _scanTotal = configsToPass.length; _scanIndex = 0; notifyListeners();
+    _isScanning = true; notifyListeners();
     
     try {
+      // RELOAD searches from disk AFTER potentially waiting for lock inside ScanEngine
+      // This ensures we have the most up-to-date config (e.g. from Background Worker)
+      final freshSearches = await _storage.loadSearches();
+      
+      List<SearchConfig> configsToPass;
+      if (singleId != null) {
+        configsToPass = freshSearches.where((s) => s.id == singleId).toList();
+      } else if (forceAll) {
+        configsToPass = freshSearches;
+      } else {
+        configsToPass = freshSearches.where((s) => s.isEnabled).toList();
+      }
+      
+      if (configsToPass.isEmpty) {
+        _isScanning = false;
+        notifyListeners();
+        return;
+      }
+
+      _scanTotal = configsToPass.length; 
+      _scanIndex = 0; 
+      notifyListeners();
+      
       final result = await _orchestrator.scan(
-        searches: savedSearches, 
+        searches: freshSearches, // Use fresh data
         currentListings: savedListings,
         onProgress: (idx, total, lbl, st) { 
           _scanIndex = idx; 
@@ -364,15 +393,24 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         singleId: singleId,
       );
       
-      if (result.successCount > 0) {
-        await _storage.setLastScanNewCount(result.newListings);
-      } else if (result.failCount > 0) {
-        await _storage.setLastFailedScan(DateTime.now(), 'Scan failed');
+      // Handle result only if lock was acquired and scan performed
+      if (result.ok || result.successCount > 0) {
+        if (result.successCount > 0) {
+          await _storage.setLastScanNewCount(result.newListings);
+        }
+        
+        // UPDATE RAM AND DISK
+        savedSearches = result.updatedConfigs; 
+        await _storage.saveSearches(savedSearches);
+        savedListings = await _storage.loadListings();
+      } else {
+        // If blocked by lock, we don't overwrite disk, but we might want to refresh RAM
+        if (result.error.contains('ključavnica')) {
+           savedSearches = await _storage.loadSearches();
+        } else if (result.failCount > 0) {
+          await _storage.setLastFailedScan(DateTime.now(), result.error);
+        }
       }
-
-      savedSearches = result.updatedConfigs; 
-      await _storage.saveSearches(savedSearches);
-      savedListings = await _storage.loadListings();
     } finally {
       _isScanning = false; 
       notifyListeners();

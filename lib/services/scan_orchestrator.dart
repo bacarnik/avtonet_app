@@ -127,8 +127,13 @@ class ScanEngine {
               final match = FilterMatcher.matches(rawListing, config);
               if (match.isMatch) {
                 if (!seenIds.contains(rawListing.id)) {
+                  debugPrint('[FORENSIC] New Match Found: ${config.name}, ID: ${rawListing.id}');
                   matched.add(rawListing);
-                  if (await _notifications.notifyNewAd(rawListing)) {
+                  
+                  final notified = await _notifications.notifyNewAd(rawListing);
+                  debugPrint('[FORENSIC] notifyNewAd result for ID ${rawListing.id}: $notified');
+                  
+                  if (notified) {
                     notificationsSent++;
                   }
                 }
@@ -157,6 +162,7 @@ class ScanEngine {
                   toAdd.add(l);
                 }
                 if (!seenIds.contains(l.id)) {
+                  debugPrint('[FORENSIC] Marking ${l.id} as SEEN (adding to idsToAdd)');
                   idsToAdd.add(l.id);
                 }
               }
@@ -197,9 +203,6 @@ class ScanEngine {
           );
         }
       }
-
-      // Batch save all updated configs after the loop finishes
-      await _storage.saveSearches(updatedConfigs);
 
       stopwatch.stop();
       debugPrint('[NOTIFICATION] $notificationsSent notifications shown');
