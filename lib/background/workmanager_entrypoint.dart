@@ -2,6 +2,7 @@ import 'package:workmanager/workmanager.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
+import 'dart:ui';
 
 import '../services/storage_service.dart';
 import '../services/log_service.dart';
@@ -14,7 +15,12 @@ const String kPeriodicScanTask = 'avtonet_periodic_scan_v3';
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
+    try {
+      DartPluginRegistrant.ensureInitialized();
+    } catch (_) {}
+    
     WidgetsFlutterBinding.ensureInitialized();
+    print('[WORKER_FORENSIC] --- EXECUTE TASK START: $taskName ---');
     final logService = LogService();
     final now = DateTime.now();
     debugPrint('[WORKER_FORENSIC] WORKER START: $taskName at $now');
@@ -65,8 +71,8 @@ void callbackDispatcher() {
       final notificationService = NotificationService.instance;
       await notificationService.initialize();
       
-      // IMPORTANT: Disable WebView in background isolate to avoid JNI/Context crashes
-      final scraper = AvtonetScraperService(logService, useWebView: false);
+      // IMPORTANT: Restored WebView in background isolate to match GOLDEN STATE (ddaf66f)
+      final scraper = AvtonetScraperService(logService);
       ScanEngineResult? result;
       try {
         final engine = ScanEngine(
@@ -166,7 +172,7 @@ Future<void> registerBackgroundTasks() async {
     // Initialize Workmanager
     await Workmanager().initialize(
       callbackDispatcher, 
-      isInDebugMode: false
+      isInDebugMode: true
     );
     debugPrint('[FORENSIC] Workmanager().initialize COMPLETED');
 
@@ -176,13 +182,13 @@ Future<void> registerBackgroundTasks() async {
     debugPrint('[FORENSIC] InitialDelay: 10s');
     debugPrint('[FORENSIC] Policy: KEEP');
 
-    // Use KEEP to avoid resetting the periodic timer on every app start
+    // Use REPLACE to ensure new code and debug mode are applied
     await Workmanager().registerPeriodicTask(
       kPeriodicScanTask,
       kPeriodicScanTask,
       frequency: const Duration(minutes: 15),
       initialDelay: const Duration(seconds: 10),
-      existingWorkPolicy: ExistingWorkPolicy.keep,
+      existingWorkPolicy: ExistingWorkPolicy.replace,
       constraints: Constraints(
         networkType: NetworkType.connected,
       ),

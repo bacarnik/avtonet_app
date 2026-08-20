@@ -106,12 +106,17 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload(); // Critical for Background Isolate to see released lock
     final isLocked = prefs.getBool('scan_lock_active') ?? false;
+    final lockOwner = prefs.getString('scan_lock_owner') ?? 'unknown';
+    final lockTime = prefs.getInt('scan_lock_time') ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final ageSeconds = (now - lockTime) ~/ 1000;
+
+    debugPrint('[SCAN_LOCK] CHECK requester=$owner active=$isLocked owner=$lockOwner age=${ageSeconds}s');
 
     if (isLocked) {
-      final lockTime = prefs.getInt('scan_lock_time') ?? 0;
       // Stale lock: 5 minutes is enough for background scan
       if (now - lockTime < 5 * 60 * 1000) {
+        debugPrint('[SCAN_LOCK] DENIED requester=$owner owner=$lockOwner age=${ageSeconds}s');
         return false;
       } else {
         debugPrint('[SCAN] [WARN] Stale lock detected, overriding (Owner: $owner)');
@@ -121,14 +126,23 @@ class StorageService {
     await prefs.setBool('scan_lock_active', true);
     await prefs.setInt('scan_lock_time', now);
     await prefs.setString('scan_lock_owner', owner);
+    debugPrint('[SCAN_LOCK] ACQUIRED owner=$owner');
     return true;
   }
 
   Future<void> releaseScanLock() async {
     final prefs = await SharedPreferences.getInstance();
+    final lockOwner = prefs.getString('scan_lock_owner') ?? 'unknown';
+    final isLocked = prefs.getBool('scan_lock_active') ?? false;
+
+    debugPrint('[SCAN_LOCK] RELEASE START owner=$lockOwner active=$isLocked');
+
     await prefs.setBool('scan_lock_active', false);
     await prefs.remove('scan_lock_time');
     await prefs.remove('scan_lock_owner');
+
+    final finalState = prefs.getBool('scan_lock_active') ?? false;
+    debugPrint('[SCAN_LOCK] RELEASE COMPLETE active=$finalState');
   }
 
   Future<List<SchedulerEvent>> loadSchedulerHistory() async {
