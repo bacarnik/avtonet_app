@@ -20,16 +20,24 @@ void callbackDispatcher() {
     } catch (_) {}
     
     WidgetsFlutterBinding.ensureInitialized();
-    print('[WORKER_FORENSIC] --- EXECUTE TASK START: $taskName ---');
     final logService = LogService();
     final now = DateTime.now();
-    debugPrint('[WORKER_FORENSIC] WORKER START: $taskName at $now');
-
     final storage = StorageService();
     final stopwatch = Stopwatch()..start();
     
-    // Log start to storage
     await storage.recordWorkerStart(now);
+    await storage.addWorkerHistoryEvent(
+      status: 'WORKER_STARTED',
+      message: 'Task: $taskName, Time: ${now.toIso8601String()}',
+    );
+
+    final isForeground = await storage.isAppForeground();
+    final isInWindow = now.hour >= 6 && now.hour < 22;
+
+    await storage.addWorkerHistoryEvent(
+      status: 'WORKER_STATE',
+      message: 'Foreground: $isForeground, InWindow: $isInWindow',
+    );
 
     String exitReason = 'UNKNOWN';
     int activeCount = 0;
@@ -37,41 +45,36 @@ void callbackDispatcher() {
     int failedCount = 0;
 
     try {
-      debugPrint('[WORKER] Milestone 1: Check Foreground');
-      // 0. Check if App is in Foreground
-      if (await storage.isAppForeground()) {
-        debugPrint('[WORKER_FORENSIC] WORKER SKIPPED (App in foreground)');
+      if (isForeground) {
+        exitReason = 'FOREGROUND_SKIP';
+        await storage.addWorkerHistoryEvent(status: exitReason);
+        await storage.recordWorkerFinish(now, false, resultStatus: exitReason);
+        await storage.addWorkerHistoryEvent(status: 'WORKER_FINISHED', exitReason: exitReason);
         return true; 
       }
 
-      debugPrint('[WORKER] Milestone 2: Night Pause Check');
-      // 1. Time restriction check (Night Pause)
-      if (now.hour < 8 || now.hour >= 22) {
-        debugPrint('[BACKGROUND] Night pause active (8-22), exiting.');
+      if (!isInWindow) {
         exitReason = 'NIGHT_PAUSE';
-        await storage.recordWorkerFinish(now, true, resultStatus: exitReason);
+        await storage.addWorkerHistoryEvent(status: exitReason, exitReason: exitReason);
+        await storage.recordWorkerFinish(now, false, resultStatus: exitReason);
+        await storage.addWorkerHistoryEvent(status: 'WORKER_FINISHED', exitReason: exitReason);
         return true;
       }
 
-      debugPrint('[WORKER] Milestone 3: Load Searches');
-      // 2. Load searches
       final searches = await storage.loadSearches();
       final activeFilters = searches.where((s) => s.isEnabled).toList();
       activeCount = activeFilters.length;
       
       if (activeFilters.isEmpty) {
-        debugPrint('[BACKGROUND] No active filters, exiting.');
         exitReason = 'NO_FILTERS';
-        await storage.recordWorkerFinish(now, true, resultStatus: 'NO_FILTERS');
+        await storage.addWorkerHistoryEvent(status: exitReason, exitReason: exitReason);
+        await storage.recordWorkerFinish(now, false, resultStatus: 'NO_FILTERS');
         return true;
       }
 
-      debugPrint('[WORKER] Milestone 4: Init Services');
-      // 3. Initialize Services
       final notificationService = NotificationService.instance;
       await notificationService.initialize();
       
-      // IMPORTANT: Restored WebView in background isolate to match GOLDEN STATE (ddaf66f)
       final scraper = AvtonetScraperService(logService);
       ScanEngineResult? result;
       try {
@@ -84,8 +87,7 @@ void callbackDispatcher() {
 
         final currentListings = await storage.loadListings();
         
-        debugPrint('[WORKER] Milestone 5: Starting Engine Scan');
-        // 4. Run Scan
+        await storage.addWorkerHistoryEvent(status: 'SCAN_STARTED');
         result = await engine.scan(
           searches: searches,
           currentListings: currentListings,
@@ -93,17 +95,16 @@ void callbackDispatcher() {
           isAuto: true,
           ownerOverride: 'WORKER',
         );
+        await storage.addWorkerHistoryEvent(status: 'SCAN_FINISHED');
 
         successCount = result.successCount;
         failedCount = result.failCount;
-        debugPrint('[BACKGROUND] Scan finished. Success: $successCount, Failed: $failedCount, New: ${result.newListings}');
 
-        // CRITICAL: Save updated configs back to storage (Single Source of Truth)
         if (result.ok || result.successCount > 0) {
           await storage.saveSearches(result.updatedConfigs);
         }
 
-        exitReason = 'SUCCESS';
+        exitReason = 'SCAN_SUCCESS';
         if (!result.ok) {
           final err = result.error.toLowerCase();
           if (err.contains('ključavnica')) {
@@ -111,27 +112,17 @@ void callbackDispatcher() {
           } else if (err.contains('cloudflare') || err.contains('403')) {
             exitReason = 'CLOUDFLARE';
             await storage.setPendingBackgroundScan(true);
-          } else if (err.contains('webview') && err.contains('timeout')) {
-            exitReason = 'WEBVIEW_TIMEOUT';
-          } else if (err.contains('timeout') || err.contains('network')) {
-            exitReason = 'HTTP_TIMEOUT';
           } else {
-            exitReason = 'ERROR';
+            exitReason = 'SCAN_FAILURE';
           }
         }
       } finally {
-        debugPrint('[WORKER] Milestone 7: Disposing Scraper');
-        // Preprečimo neskončno čakanje na WebView v ozadju
-        await scraper.dispose().timeout(const Duration(seconds: 5), onTimeout: () {
-          debugPrint('[WORKER] WARNING: Scraper dispose timed out after 5s');
-        });
+        await scraper.dispose().timeout(const Duration(seconds: 5), onTimeout: () {});
       }
 
-      debugPrint('[WORKER] Milestone 8: Recording Result');
-      // 5. Record Result
       await storage.recordWorkerFinish(
         DateTime.now(), 
-        true, 
+        exitReason == 'SCAN_SUCCESS',
         filtersScanned: activeCount,
         newAdsFound: result?.newListings ?? 0,
         notificationsSent: result?.notificationsSent ?? 0,
@@ -147,81 +138,138 @@ void callbackDispatcher() {
         usedWebView: true,
       );
 
-      debugPrint('[WORKER_FORENSIC] WORKER FINISH. RESULT = $exitReason');
+      await storage.addWorkerHistoryEvent(
+        status: exitReason, 
+        durationMs: stopwatch.elapsedMilliseconds,
+        exitReason: exitReason,
+      );
+
+      await storage.addWorkerHistoryEvent(status: 'WORKER_FINISHED', exitReason: exitReason);
+
       return true;
     } catch (e, stack) {
-      debugPrint('[WORKER_FORENSIC] WORKER FINISH. RESULT = EXCEPTION: $e');
       if (stack != null) debugPrint(stack.toString());
+      exitReason = 'EXCEPTION';
       await storage.recordWorkerFinish(
         DateTime.now(), 
         false, 
         error: e.toString(), 
-        resultStatus: 'EXCEPTION'
+        resultStatus: exitReason
       );
+      await storage.addWorkerHistoryEvent(
+        status: exitReason,
+        message: e.toString(),
+        durationMs: stopwatch.elapsedMilliseconds,
+        exitReason: exitReason,
+      );
+      await storage.addWorkerHistoryEvent(status: 'WORKER_FINISHED', exitReason: exitReason);
       return false;
     }
   });
 }
 
 Future<void> registerBackgroundTasks() async {
+  final storage = StorageService();
+
   try {
-    debugPrint('[FORENSIC] registerBackgroundTasks START');
-    final storage = StorageService();
-    
-    debugPrint('[FORENSIC] Calling Workmanager().initialize...');
-    // Initialize Workmanager
-    await Workmanager().initialize(
-      callbackDispatcher, 
-      isInDebugMode: true
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_INIT_START',
     );
-    debugPrint('[FORENSIC] Workmanager().initialize COMPLETED');
 
-    debugPrint('[FORENSIC] registerPeriodicTask START');
-    debugPrint('[FORENSIC] UniqueName: $kPeriodicScanTask');
-    debugPrint('[FORENSIC] Frequency: 15m');
-    debugPrint('[FORENSIC] InitialDelay: 10s');
-    debugPrint('[FORENSIC] Policy: KEEP');
+    await Workmanager().initialize(
+      callbackDispatcher,
+      isInDebugMode: false,
+    );
 
-    // Use REPLACE to ensure new code and debug mode are applied
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_INIT_OK',
+    );
+
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_PERIODIC_REGISTER_START',
+      message: kPeriodicScanTask,
+    );
+
     await Workmanager().registerPeriodicTask(
       kPeriodicScanTask,
       kPeriodicScanTask,
       frequency: const Duration(minutes: 15),
       initialDelay: const Duration(seconds: 10),
-      existingWorkPolicy: ExistingWorkPolicy.replace,
+      existingWorkPolicy: ExistingWorkPolicy.keep,
       constraints: Constraints(
         networkType: NetworkType.connected,
       ),
     );
-    
-    debugPrint('[FORENSIC] registerPeriodicTask RETURNED SUCCESS');
-    
-    // Trigger native forensic check
+
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_PERIODIC_REGISTER_OK',
+      message: kPeriodicScanTask,
+    );
+
     try {
-      const MethodChannel forensicsChannel = MethodChannel('com.example.avtonet_app/forensics');
-      await forensicsChannel.invokeMethod('runForensicCheck');
+      const channel =
+          MethodChannel('com.example.avtonet_app/forensics');
+
+      await channel.invokeMethod('runForensicCheck');
+
+      await storage.addWorkerHistoryEvent(
+        status: 'WM_FORENSIC_REQUESTED',
+      );
     } catch (e) {
-      debugPrint('[FORENSIC] Could not trigger native diagnostic: $e');
+      await storage.addWorkerHistoryEvent(
+        status: 'WM_FORENSIC_ERROR',
+        message: e.toString(),
+      );
     }
 
     await storage.recordWorkerRegistration(DateTime.now());
-    debugPrint('[FORENSIC] Worker registration timestamp recorded in storage');
+
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_REGISTRATION_COMPLETE',
+    );
   } catch (e, stack) {
-    debugPrint('[FORENSIC] [ERROR] registerBackgroundTasks failed!');
-    debugPrint('[FORENSIC] Error: $e');
-    if (stack != null) {
-      debugPrint('[FORENSIC] Stacktrace: $stack');
-    }
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_REGISTRATION_ERROR',
+      message: '$e\n$stack',
+    );
+
+    debugPrint('[BACKGROUND] REGISTRATION ERROR: $e');
+    debugPrint(stack.toString());
   }
 }
 
 Future<void> runTestBackgroundTask() async {
-  await Workmanager().registerOneOffTask(
-    'test_background_scan_${DateTime.now().millisecondsSinceEpoch}',
-    kPeriodicScanTask,
-    initialDelay: const Duration(seconds: 1),
-    constraints: Constraints(
-      networkType: NetworkType.connected,
-    ),
-  );
+  final storage = StorageService();
+
+  final id =
+      'test_background_scan_${DateTime.now().millisecondsSinceEpoch}';
+
+  try {
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_TEST_REGISTER_START',
+      message: id,
+    );
+
+    await Workmanager().registerOneOffTask(
+      id,
+      kPeriodicScanTask,
+      initialDelay: const Duration(seconds: 1),
+      constraints: Constraints(
+        networkType: NetworkType.connected,
+      ),
+    );
+
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_TEST_REGISTER_OK',
+      message: id,
+    );
+  } catch (e, stack) {
+    await storage.addWorkerHistoryEvent(
+      status: 'WM_TEST_REGISTER_ERROR',
+      message: '$e\n$stack',
+    );
+
+    debugPrint('[BACKGROUND] TEST REGISTER ERROR: $e');
+    debugPrint(stack.toString());
+  }
 }

@@ -156,31 +156,37 @@ class SearchConfig {
     final String legacyModel = json['model'] as String? ?? '';
     final String? mId = json['modelId'] as String?;
     final String? mSearch = json['modelSearchValue'] as String?;
+    final String? subGroup = json['subModelGroup'] as String?;
 
-    // Izboljšana detekcija: če je mSearch prazna, jo poskusimo obnoviti
-    String finalSearchValue = (mSearch != null && mSearch.isNotEmpty) 
-        ? mSearch 
-        : (legacyModel.endsWith(':') ? legacyModel : '');
-    
-    String? finalModelId = mId ?? (legacyModel.isNotEmpty && !legacyModel.endsWith(':') ? legacyModel : null);
+    // 1. Detekcija skupine na podlagi subModelGroup (generično)
+    final bool isGroup = subGroup != null && subGroup.isNotEmpty;
 
-    // VARNA MIGRACIJA: Odpravlja prejšnjo korupcijo podatkov (npr. modelId="33", modelSearchValue="33:")
-    // Če je modelSearchValue le ponovljen modelId z dodanim dvopičjem, ga očistimo.
-    // IZJEMA: BMW "Serija" modeli (npr. "Serija 1") NUJNO potrebujejo dvopičje v modelSearchValue.
+    String finalSearchValue = mSearch ?? '';
+    String? finalModelId = mId;
+
+    if (isGroup) {
+      // Za skupine (vsi) modelId ne sme biti nastavljen, ker bi povozil searchValue
+      finalModelId = null;
+      // Če je searchValue prazna, jo rekonstruiramo iz subGroup
+      if (finalSearchValue.isEmpty) {
+        finalSearchValue = subGroup;
+      }
+    } else {
+      // Za konkretne modele: če modelId manjka, ga vzamemo iz legacy polja
+      if (finalModelId == null && legacyModel.isNotEmpty && !legacyModel.endsWith(':')) {
+        finalModelId = legacyModel;
+      }
+      // Če je searchValue prazna pri starem zapisu BMW serije (ki nima subGroup)
+      if (finalSearchValue.isEmpty && legacyModel.endsWith(':')) {
+        finalSearchValue = legacyModel;
+      }
+    }
+
+    // 2. VARNA MIGRACIJA: Odpravlja prejšnjo korupcijo podatkov (npr. modelId="33", modelSearchValue="33:")
     if (finalModelId != null && finalModelId.isNotEmpty && 
         finalSearchValue.toLowerCase() == '${finalModelId.toLowerCase()}:' &&
         !finalModelId.toLowerCase().contains('serija')) {
        finalSearchValue = '';
-    }
-
-    // POPRAVEK ZA BMW: Če je modelSearchValue prazna pri BMW Serijah, jo obnovimo iz modelId ali legacyModel
-    final String make = json['znamka'] as String? ?? '';
-    if (make.toLowerCase() == 'bmw' && finalSearchValue.isEmpty) {
-       final String potentialModel = finalModelId ?? legacyModel;
-       if (potentialModel.toLowerCase().contains('serija')) {
-          finalSearchValue = potentialModel.endsWith(':') ? potentialModel : '$potentialModel:';
-          finalModelId = null; // Za skupine BMW modelId v URL-ju ne sme biti nastavljen
-       }
     }
 
     return SearchConfig(
@@ -218,7 +224,7 @@ class SearchConfig {
       lastGeneratedUrl: json['lastGeneratedUrl'] as String? ?? '',
       modelSearchValue: finalSearchValue,
       modelId: finalModelId,
-      subModelGroup: json['subModelGroup'] as String?,
+      subModelGroup: subGroup,
     );
   }
 

@@ -6,6 +6,7 @@ import '../models/car_listing.dart';
 import '../models/history_filter.dart';
 import '../data/body_types.dart';
 import '../data/filter_options.dart';
+import '../models/search_config.dart';
 
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key, required this.controller});
@@ -252,7 +253,16 @@ class _HistoryTabState extends State<HistoryTab> {
 
   List<CarListing> _applyFiltersAndSort(List<CarListing> source, HistoryFilter hf) {
     final filtered = source.where((l) {
-      if (hf.make.isNotEmpty && !l.title.toLowerCase().contains(hf.make.toLowerCase())) return false;
+      if (hf.make.isNotEmpty) {
+        final titleLower = l.title.toLowerCase();
+        final makeLower = hf.make.toLowerCase();
+        bool makeMatch = titleLower.contains(RegExp('\\b${RegExp.escape(makeLower)}\\b'));
+        if (!makeMatch && makeLower == 'volkswagen') {
+          makeMatch = titleLower.contains(RegExp(r'\bvw\b'));
+        }
+        if (!makeMatch) return false;
+      }
+      
       if (hf.model.isNotEmpty && !l.title.toLowerCase().contains(hf.model.toLowerCase())) return false;
       
       final price = int.tryParse(l.price.replaceAll(RegExp(r'\D'), ''));
@@ -267,7 +277,25 @@ class _HistoryTabState extends State<HistoryTab> {
         if (hf.yearMax != null && year > hf.yearMax!) return false;
       }
 
-      if (hf.bodyCode != 0 && l.bodyType != hf.bodyCode) return false;
+      if (hf.bodyCode != 0) {
+        // Strict match if body type was successfully parsed
+        if (l.bodyType != 0 && l.bodyType != hf.bodyCode) return false;
+        
+        // If body type is unknown (0), we check if the search that found this ad 
+        // actually requested this body type.
+        if (l.bodyType == 0) {
+          final config = widget.controller.savedSearches.firstWhere(
+            (s) => s.id == l.searchConfigId,
+            orElse: () => SearchConfig(id: '', name: '', znamka: ''),          );
+          if (config.id.isNotEmpty) {
+            final configBodyCodes = config.oblika.split(',').map((e) => int.tryParse(e)).whereType<int>();
+            if (!configBodyCodes.contains(hf.bodyCode)) return false;
+          } else {
+            // No config info, and bodyType is 0, hide it from specific body filter
+            return false;
+          }
+        }
+      }
 
       if (hf.fuelCode != 0) {
           final fuelText = l.fuel.toLowerCase();

@@ -5,16 +5,22 @@ class SchedulerEvent {
     required this.timestamp,
     required this.status,
     this.message = '',
+    this.durationMs,
+    this.exitReason,
   });
 
   final DateTime timestamp;
-  final String status; // SUCCESS, FAIL
+  final String status; 
   final String message;
+  final int? durationMs;
+  final String? exitReason;
 
   Map<String, dynamic> toJson() => {
     'timestamp': timestamp.toIso8601String(),
     'status': status,
     'message': message,
+    'durationMs': durationMs,
+    'exitReason': exitReason,
   };
 
   factory SchedulerEvent.fromJson(Map<String, dynamic> json) {
@@ -22,6 +28,8 @@ class SchedulerEvent {
       timestamp: DateTime.parse(json['timestamp'] as String),
       status: json['status'] as String,
       message: json['message'] as String? ?? '',
+      durationMs: json['durationMs'] as int?,
+      exitReason: json['exitReason'] as String?,
     );
   }
 

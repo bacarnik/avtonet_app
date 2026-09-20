@@ -132,11 +132,33 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
           opt.text.toLowerCase().contains('izberite model')) continue;
 
       // Robust key normalization for cross-isolate matching
-      final brandKey = _normalizeKey(brandKeyRaw);
+      final brandKey = _normalizeKey(
+        brandKeyRaw.replaceAll(
+          RegExp(r'\bvsi\b', caseSensitive: false),
+          '',
+        ),
+      );
+      if (brandKeyRaw.toLowerCase().contains('vsi') ||
+          value.toLowerCase().contains('(vsi)')) {
+        debugPrint(
+          '[MODEL_GROUP_DEBUG] '
+              'class="$brandKeyRaw" '
+              'value="$value" '
+              'text="${opt.text}" '
+              'brandKey="$brandKey"',
+        );
+      }
 
       final rawText = opt.text;
-      final isIndented = rawText.startsWith('\u00A0') || rawText.startsWith(' ');
-      final isGroup = brandKeyRaw.toLowerCase().contains('vsi') || value.endsWith(' (vsi)');
+      final isIndented =
+          rawText.startsWith('\u00A0') || rawText.startsWith(' ');
+
+      // Avto.net eksplicitno označi skupinske modele z "vsi"
+      // v class atributu ali z "(vsi)" na koncu value.
+      // To mora ostati popolnoma generično – brez preverjanja znamke/modela.
+      final isGroup =
+          brandKeyRaw.toLowerCase().split(RegExp(r'\s+')).contains('vsi') ||
+          RegExp(r'\s*\(vsi\)\s*$', caseSensitive: false).hasMatch(value);
 
       String displayName = rawText.replaceAll('\u00A0', '').trim();
       String searchValue = '';
@@ -144,13 +166,28 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
       String? modelId;
 
       if (isGroup) {
-        subModelGroup = value.replaceAll(' (vsi)', '').trim();
-        searchValue = subModelGroup.toLowerCase().contains('serija') 
-            ? '$subModelGroup:' 
-            : subModelGroup;
+        // Odstrani samo "(vsi)" na koncu originalnega Avto.net value.
+        //
+        // Pomembno:
+        // "serija 3: (vsi)" -> "serija 3:"
+        // "Golf (vsi)"       -> "Golf"
+        //
+        // Originalnega ":" ne dodajamo in ne spreminjamo.
+        final groupSearchValue = value
+            .replaceFirst(
+              RegExp(r'\s*\(vsi\)\s*$', caseSensitive: false),
+              '',
+            )
+            .trim();
+
+        subModelGroup = groupSearchValue;
+        searchValue = groupSearchValue;
+        modelId = null;
       } else if (isIndented) {
+        // OHRANI OBSTOJEČE OBNAŠANJE KONKRETNIH PODMODELOV.
         searchValue = value;
       } else {
+        // OHRANI OBSTOJEČO LOGIKA za ostale modele.
         if (value.toLowerCase().contains('serija')) {
           subModelGroup = value;
           searchValue = '$value:';

@@ -19,19 +19,20 @@ int? _normalizePower(int? value, String unit) {
 
 /// REFACTORED: Uses CP1250 encoding for Avto.net parameters.
 String buildAvtonetResultsUrl(SearchConfig config) {
-  debugPrint('[FORENSIC] URL BUILDER START');
-  debugPrint('[FORENSIC] filter.brand: ${config.znamka}');
-  debugPrint('[FORENSIC] filter.model (display): ${config.model}');
-  debugPrint('[FORENSIC] filter.modelId: ${config.modelId}');
-  debugPrint('[FORENSIC] filter.modelSearchValue: ${config.modelSearchValue}');
+  final params = buildAvtonetUrlParams(config);
+  return _buildFromMap(params);
+}
 
+Map<String, String> buildAvtonetUrlParams(SearchConfig config) {
   final String eq7 = _eq7ForTransmission(config.menjalnik) ?? '1110100120';
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
 
-  // Logic to determine the correct 'model' parameter value
-  // If we have a specific model ID, use it. 
-  // Otherwise, use the modelSearchValue (which for BMW Serija 1 should be 'Serija 1:')
+  debugPrint('[URL_MODEL_DEBUG] model=${config.model}');
+  debugPrint('[URL_MODEL_DEBUG] modelSearchValue=${config.modelSearchValue}');
+  debugPrint('[URL_MODEL_DEBUG] modelId=${config.modelId}');
+  debugPrint('[URL_MODEL_DEBUG] subModelGroup=${config.subModelGroup}');
+
   String modelValue = '';
   if (config.modelId != null && config.modelId!.isNotEmpty) {
     modelValue = config.modelId!;
@@ -39,12 +40,24 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     modelValue = config.modelSearchValue;
   }
 
-  // Use the raw values from config, but we will encode them later.
+  final bool isGroup =
+      config.subModelGroup != null &&
+      config.subModelGroup!.isNotEmpty;
+
+  debugPrint('[URL_MODEL_DEBUG] finalModelValue=$modelValue');
+  debugPrint('[URL_MODEL_DEBUG] isGroup=$isGroup');
+
+  // EQ9: groups have 9 digits (100000002), concrete models have 10 digits (1000000020)
+  // KAT: 1012000000 is proven for used passenger car searches
+  final String eq9 = isGroup
+      ? '100000002'
+      : '1000000020';
+
   final params = <String, String>{
     'znamka': config.znamka,
-    'model': modelValue, 
-    'SUBmodelsearch': '', // Only used for manual text entry
-    'SUBmodgrp1': config.subModelGroup ?? '0',
+    'model': modelValue,
+    'SUBmodelsearch': isGroup ? '' : modelValue,
+    'SUBmodgrp1': isGroup ? '0' : (config.subModelGroup ?? '0'),
     'cenaMin': '${config.cenaMin ?? 0}',
     'cenaMax': '${config.cenaMax ?? 999999}',
     'letnikMin': '${config.letnikMin ?? 0}',
@@ -54,7 +67,7 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'oblika': config.oblika,
     'ccmMin': '${config.ccmMin ?? 0}',
     'ccmMax': '${config.ccmMax ?? 99999}',
-    'mocMin': '', 
+    'mocMin': '',
     'mocMax': '',
     'kmMin': '${config.kmMin ?? 0}',
     'kmMax': '${config.kmMax ?? 9999999}',
@@ -68,8 +81,8 @@ String buildAvtonetResultsUrl(SearchConfig config) {
     'EQ5': '1000000000',
     'EQ6': '1000000000',
     'EQ7': eq7,
-    'EQ9': '100000000',
-    'KAT': '1010000000',
+    'EQ9': eq9,
+    'KAT': '1012000000',
     'stran': '1',
   };
 
@@ -77,9 +90,7 @@ String buildAvtonetResultsUrl(SearchConfig config) {
   if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
   if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
 
-  debugPrint('[FORENSIC] generated queryParameters: $params');
-
-  return _buildFromMap(params);
+  return params;
 }
 
 String _buildFromMap(Map<String, String> params) {

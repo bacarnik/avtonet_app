@@ -49,6 +49,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   int _scanTotal = 0;
   String _scanLabel = '';
   Timer? _autoScanTimer;
+  Timer? _heartbeatTimer;
   DateTime? _nextScanTime;
   AvtonetCatalogData? _catalog;
 
@@ -87,7 +88,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   List<String> get makes => allBrands.map((b) => b.displayName).toList();
-  List<AvtonetModel> get availableModels => _catalog?.modelsByBrand[selectedMake] ?? [];
+  List<AvtonetModel> get availableModels => _catalog?.modelsByBrand[_normalizeKey(selectedMake)] ?? [];
   List<String> get models => availableModels.map((m) => m.displayName).toList();
   bool get isModelDropdownEnabled => selectedMake.isNotEmpty;
 
@@ -153,6 +154,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _catalog = await _catalogService.getCatalog();
     
     savedSearches = await _storage.loadSearches();
+    for (var s in savedSearches) {
+      debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE LOAD');
+      debugPrint('[STORAGE_MODEL_DEBUG] filter="${s.name}"');
+      debugPrint('[STORAGE_MODEL_DEBUG] model="${s.model}"');
+      debugPrint('[STORAGE_MODEL_DEBUG] modelSearchValue="${s.modelSearchValue}"');
+      debugPrint('[STORAGE_MODEL_DEBUG] modelId="${s.modelId}"');
+      debugPrint('[STORAGE_MODEL_DEBUG] subModelGroup="${s.subModelGroup}"');
+    }
     savedListings = await _storage.loadListings();
     historyFilter = await _storage.loadHistoryFilter();
     schedulerHistory = await _storage.loadSchedulerHistory();
@@ -168,43 +177,48 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _initialized = true;
     notifyListeners();
     
+    _startHeartbeat();
+
     final needsScan = await _storage.consumePendingBackgroundScan();
     if (needsScan) {
       runSequentialScan();
     }
   }
 
-  void _onSchedulerTick() {
+  void _onSchedulerTick() async {
     final now = DateTime.now();
     _calculateNextScanTime();
 
-    // Only trigger if in active window 08:00-22:00
-    if (now.hour < 8 || now.hour >= 22) return;
+    // Only trigger if in active window 06:00-22:00
+    if (now.hour < 6 || now.hour >= 22) return;
+
+    // Only trigger scheduler if app is actually in foreground to avoid collision with WorkManager
+    if (!await _storage.isAppForeground()) return;
 
     // Trigger every 15 minutes (00, 15, 30, 45)
     if (now.minute % 15 == 0 && now.minute != _lastTriggerMinute) {
       _lastTriggerMinute = now.minute;
       
       // Check if last successful scan was recent (within 13 mins) to avoid redundant scans
-      _storage.getLastSuccessfulScan().then((lastScan) {
-        if (lastScan != null) {
-          final diff = now.difference(lastScan).inMinutes;
-          if (diff < 14) {
-             debugPrint('[SCHEDULER] Skipping scan, last success was $diff mins ago');
-             return;
-          }
+      final lastScan = await _storage.getLastSuccessfulScan();
+      if (lastScan != null) {
+        final diff = now.difference(lastScan).inMinutes;
+        if (diff < 14) {
+           debugPrint('[SCHEDULER] Skipping scan, last success was $diff mins ago');
+           return;
         }
-        debugPrint('[SCHEDULER] Triggering scan');
-        runSequentialScan();
-      });
+      }
+      debugPrint('[SCHEDULER] Triggering scan');
+      runSequentialScan();
     }
   }
 
   void _calculateNextScanTime() {
     final now = DateTime.now();
     
-    if (now.hour >= 22) {
-      _nextScanTime = DateTime(now.year, now.month, now.day + 1, 8, 0);
+    if (now.hour >= 22 || now.hour < 6) {
+      final baseDate = now.hour >= 22 ? now.day + 1 : now.day;
+      _nextScanTime = DateTime(now.year, now.month, baseDate, 6, 0);
       notifyListeners();
       return;
     }
@@ -219,10 +233,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       next = DateTime(now.year, now.month, now.day, now.hour, nextMinute);
     }
     
-    if (next.hour < 8) {
-      next = DateTime(next.year, next.month, next.day, 8, 0);
+    if (next.hour < 6) {
+      next = DateTime(next.year, next.month, next.day, 6, 0);
     } else if (next.hour >= 22) {
-      next = DateTime(next.year, next.month, next.day + 1, 8, 0);
+      next = DateTime(next.year, next.month, next.day + 1, 6, 0);
     }
     
     if (_nextScanTime != next) {
@@ -232,13 +246,29 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      _storage.updateForegroundHeartbeat();
+    });
+    // Immediate update
+    _storage.updateForegroundHeartbeat();
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _storage.setAppForeground(true);
+      _startHeartbeat();
       _checkPendingScan();
     } else if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
       _storage.setAppForeground(false);
+      _stopHeartbeat();
     }
   }
 
@@ -259,6 +289,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     selectedModelSearchValue = ''; selectedModelId = null; selectedSubModelGroup = null;
     selectedBodyTypes = []; powerUnit = 'kW'; selectedFuel = 0;
     selectedTransmission = ''; draftSearchName = '';
+    _isNameManual = false;
     kmMinText = null; kmMaxText = null; letnikMinText = null;
     letnikMaxText = null; cenaMinText = null; cenaMaxText = null;
     ccmMinText = null; ccmMaxText = null; mocMinText = null; mocMaxText = null;
@@ -272,7 +303,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     selectedSubModelGroup = config.subModelGroup;
     selectedBodyTypes = config.oblika.split(',').map((e) => int.tryParse(e)).where((e) => e != null && e != 0).cast<int>().toList();
     powerUnit = config.powerUnit; selectedFuel = config.bencin; selectedTransmission = config.menjalnik;
-    draftSearchName = config.name; kmMinText = config.kmMin?.toString(); kmMaxText = config.kmMax?.toString();
+    draftSearchName = config.name; 
+    _isNameManual = config.name != _generateAutoName(config.znamka, config.model);
+    kmMinText = config.kmMin?.toString(); kmMaxText = config.kmMax?.toString();
     letnikMinText = config.letnikMin?.toString(); letnikMaxText = config.letnikMax?.toString();
     cenaMinText = config.cenaMin?.toString(); cenaMaxText = config.cenaMax?.toString();
     ccmMinText = config.ccmMin?.toString(); ccmMaxText = config.ccmMax?.toString();
@@ -286,19 +319,49 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     selectedModelSearchValue = '';
     selectedModelId = null;
     selectedSubModelGroup = null;
+    _updateAutoNameIfNeeded();
     notifyListeners(); 
   }
 
-  void onModelChanged(String? modelName) { 
+  void onModelChanged(String? modelName) {
     selectedModel = modelName ?? '';
+
+    debugPrint('[MODEL_SELECT_DEBUG] selectedMake="$selectedMake"');
+    debugPrint('[MODEL_SELECT_DEBUG] selectedModel="$selectedModel"');
+    debugPrint(
+      '[MODEL_SELECT_DEBUG] availableModels count=${availableModels.length}',
+    );
+
     final modelData = availableModels.firstWhere(
       (m) => m.displayName == modelName,
-      orElse: () => AvtonetModel(displayName: '', searchValue: ''),
+      orElse: () => AvtonetModel(
+        displayName: '',
+        searchValue: '',
+      ),
     );
+
+    debugPrint(
+      '[MODEL_SELECT_DEBUG] FOUND '
+      'displayName="${modelData.displayName}" '
+      'searchValue="${modelData.searchValue}" '
+      'modelId="${modelData.modelId}" '
+      'subModelGroup="${modelData.subModelGroup}"',
+    );
+
     selectedModelSearchValue = modelData.searchValue;
     selectedModelId = modelData.modelId;
     selectedSubModelGroup = modelData.subModelGroup;
-    notifyListeners(); 
+
+    debugPrint(
+      '[MODEL_SELECT_DEBUG] SAVED STATE '
+      'selectedModel="$selectedModel" '
+      'selectedModelSearchValue="$selectedModelSearchValue" '
+      'selectedModelId="$selectedModelId" '
+      'selectedSubModelGroup="$selectedSubModelGroup"',
+    );
+
+    _updateAutoNameIfNeeded();
+    notifyListeners();
   }
   void toggleBodyType(int code) {
     if (code == 0) selectedBodyTypes = [];
@@ -308,7 +371,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   void setPowerUnit(String unit) { powerUnit = unit; notifyListeners(); }
   void onFuelChanged(int? code) { selectedFuel = code ?? 0; notifyListeners(); }
   void onTransmissionChanged(String? id) { selectedTransmission = id ?? ''; notifyListeners(); }
-  void setDraftSearchName(String v) { draftSearchName = v; notifyListeners(); }
+  
+  void setDraftSearchName(String v) { 
+    draftSearchName = v; 
+    _isNameManual = v.trim().isNotEmpty && v != _generateAutoName(selectedMake, selectedModel);
+    notifyListeners(); 
+  }
+  
   void setKmMin(String v) { kmMinText = v; notifyListeners(); }
   void setKmMax(String v) { kmMaxText = v; notifyListeners(); }
   void setLetnikMin(String v) { letnikMinText = v; notifyListeners(); }
@@ -323,6 +392,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<bool> saveCurrentSearch() async {
     final name = draftSearchName.trim().isEmpty ? _defaultSearchName() : draftSearchName.trim();
     String oblikaCsv = selectedBodyTypes.isEmpty ? '0' : selectedBodyTypes.join(',');
+    debugPrint('[SAVE_MODEL_DEBUG] BEFORE SAVE');
+    debugPrint('[SAVE_MODEL_DEBUG] selectedMake="$selectedMake"');
+    debugPrint('[SAVE_MODEL_DEBUG] selectedModel="$selectedModel"');
+    debugPrint(
+      '[SAVE_MODEL_DEBUG] selectedModelSearchValue="$selectedModelSearchValue"',
+    );
+    debugPrint('[SAVE_MODEL_DEBUG] selectedModelId="$selectedModelId"');
+    debugPrint('[SAVE_MODEL_DEBUG] selectedSubModelGroup="$selectedSubModelGroup"');
     final config = SearchConfig(
       id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), 
       name: name, 
@@ -336,6 +413,17 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       ccmMin: _parseInt(ccmMinText), ccmMax: _parseInt(ccmMaxText), mocMin: _parseInt(mocMinText), mocMax: _parseInt(mocMaxText),
       powerUnit: powerUnit, bencin: selectedFuel, menjalnik: selectedTransmission, createdAt: DateTime.now(),
     );
+
+    debugPrint('[CONFIG_MODEL_DEBUG] AFTER CONFIG CONSTRUCTION');
+    debugPrint('[CONFIG_MODEL_DEBUG] model="${config.model}"');
+    debugPrint(
+      '[CONFIG_MODEL_DEBUG] modelSearchValue="${config.modelSearchValue}"',
+    );
+    debugPrint('[CONFIG_MODEL_DEBUG] modelId="${config.modelId}"');
+    debugPrint(
+      '[CONFIG_MODEL_DEBUG] subModelGroup="${config.subModelGroup}"',
+    );
+
     if (editingId != null) {
       final idx = savedSearches.indexWhere((s) => s.id == editingId);
       if (idx != -1) savedSearches[idx] = config.copyWith(lastChecked: savedSearches[idx].lastChecked, lastStatus: savedSearches[idx].lastStatus);
@@ -343,7 +431,31 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       if (savedSearches.length >= maxSavedSearches) return false;
       savedSearches = [...savedSearches, config];
     }
+
+    debugPrint('[STORAGE_MODEL_DEBUG] BEFORE STORAGE SAVE');
+    debugPrint('[STORAGE_MODEL_DEBUG] model="${config.model}"');
+    debugPrint(
+      '[STORAGE_MODEL_DEBUG] modelSearchValue="${config.modelSearchValue}"',
+    );
+    debugPrint('[STORAGE_MODEL_DEBUG] modelId="${config.modelId}"');
+    debugPrint(
+      '[STORAGE_MODEL_DEBUG] subModelGroup="${config.subModelGroup}"',
+    );
+
     await _storage.saveSearches(savedSearches);
+
+    // Verify what is in the RAM list after save
+    final savedFilter = savedSearches.firstWhere((s) => s.id == (editingId ?? config.id));
+    debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE SAVE');
+    debugPrint('[STORAGE_MODEL_DEBUG] model="${savedFilter.model}"');
+    debugPrint(
+      '[STORAGE_MODEL_DEBUG] modelSearchValue="${savedFilter.modelSearchValue}"',
+    );
+    debugPrint('[STORAGE_MODEL_DEBUG] modelId="${savedFilter.modelId}"');
+    debugPrint(
+      '[STORAGE_MODEL_DEBUG] subModelGroup="${savedFilter.subModelGroup}"',
+    );
+
     editingId = null; notifyListeners();
     return true;
   }
@@ -359,6 +471,15 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       // RELOAD searches from disk AFTER potentially waiting for lock inside ScanEngine
       // This ensures we have the most up-to-date config (e.g. from Background Worker)
       final freshSearches = await _storage.loadSearches();
+
+      for (var s in freshSearches) {
+        debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE LOAD (SCAN)');
+        debugPrint('[STORAGE_MODEL_DEBUG] filter="${s.name}"');
+        debugPrint('[STORAGE_MODEL_DEBUG] model="${s.model}"');
+        debugPrint('[STORAGE_MODEL_DEBUG] modelSearchValue="${s.modelSearchValue}"');
+        debugPrint('[STORAGE_MODEL_DEBUG] modelId="${s.modelId}"');
+        debugPrint('[STORAGE_MODEL_DEBUG] subModelGroup="${s.subModelGroup}"');
+      }
       
       List<SearchConfig> configsToPass;
       if (singleId != null) {
@@ -478,8 +599,30 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   String _defaultSearchName() {
-    final make = selectedMake.isEmpty ? 'Vse znamke' : selectedMake;
-    return '$make ${selectedModel.isEmpty ? "" : selectedModel}';
+    return _generateAutoName(selectedMake, selectedModel);
+  }
+
+  bool _isNameManual = false;
+
+  String _getBrandDisplayName(String value) {
+    if (value.isEmpty) return 'Vse znamke';
+    try {
+      return allBrands.firstWhere((b) => b.value == value).displayName;
+    } catch (_) {
+      return value;
+    }
+  }
+
+  String _generateAutoName(String makeValue, String modelName) {
+    final makePart = _getBrandDisplayName(makeValue);
+    final modelPart = modelName.isEmpty ? '' : ' $modelName';
+    return '$makePart$modelPart'.trim();
+  }
+
+  void _updateAutoNameIfNeeded() {
+    if (!_isNameManual) {
+      draftSearchName = _generateAutoName(selectedMake, selectedModel);
+    }
   }
 
   String bodyTypeLabel(String csv) {
@@ -491,6 +634,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() { 
     WidgetsBinding.instance.removeObserver(this); 
     _lifecycleScheduler.dispose(); 
+    _stopHeartbeat();
     _scraper.dispose(); // CRITICAL: Clean up WebView resources
     super.dispose(); 
   }

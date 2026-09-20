@@ -257,13 +257,17 @@ class AvtonetHtmlParser {
     
     // 1. Karavan / Station Wagon
     if (text.contains('karavan') || text.contains('touring') || text.contains('variant') || 
-        text.contains('avant') || text.contains('sw') || text.contains('wagon') || 
+        text.contains('avant') || text.contains('wagon') ||
         text.contains('shooting brake') || (text.contains('kombi') && !text.contains('kombilimuzina'))) return 13;
     
     // 2. Hatchback / Kombilimuzina / Compact
     if (text.contains('hatchback') || text.contains('kombilimuzina') || text.contains('compact') || 
         text.contains('sportback') || text.contains(' 3 vrat') || text.contains(' 5 vrat') || 
-        text.contains('berlina')) return 12;
+        text.contains('berlina') || text.contains('clio') || text.contains('megane') || 
+        text.contains('golf') || text.contains('polo') || text.contains('astra') || 
+        text.contains('corsa') || text.contains('fiesta') || text.contains('focus') ||
+        text.contains('i20') || text.contains('i30') || text.contains('a3') || 
+        text.contains('yaris') || text.contains('auris')) return 12;
     
     // 3. Limuzina / Sedan / Saloon
     if (text.contains('limuzina') || text.contains('sedan') || text.contains('saloon') || 

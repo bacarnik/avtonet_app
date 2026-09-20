@@ -1,8 +1,9 @@
 import 'package:flutter/foundation.dart';
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
+import '../models/scan_diagnostic.dart';
+import '../utils/url_builder.dart';
 import 'avtonet_scraper_service.dart';
-import 'filter_matcher.dart';
 import 'log_service.dart';
 import 'notification_service.dart';
 import 'storage_service.dart';
@@ -60,12 +61,33 @@ class ScanEngine {
     _cancelRequested = false;
     final method = ownerOverride ?? (isAuto ? 'AUTO' : 'MANUAL');
     final stopwatch = Stopwatch()..start();
-
-    debugPrint('[SCAN] Started (owner: $method)');
     
-    if (!await _storage.acquireScanLock(method)) {
-      debugPrint('[SCAN] [WARN] Blocked by lock ($method)');
+    // Create a unique owner ID for this specific scan session
+    final String lockOwnerId = '$method:${DateTime.now().millisecondsSinceEpoch}';
+
+    final session = ScanSession(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      startTime: DateTime.now(),
+      method: method,
+    );
+    await _storage.addScanSession(session);
+
+    debugPrint('[SCAN] Started (owner: $lockOwnerId)');
+    
+    if (!await _storage.acquireScanLock(lockOwnerId)) {
+      final lockInfo = await _storage.getCurrentLockInfo();
+      final currentOwner = lockInfo['owner'] ?? 'unknown';
+      
+      debugPrint('[SCAN_FILTER] BLOCKED_BY_LOCK currentOwner=$currentOwner');
       debugPrint('[SCAN] Failed (Lock active)');
+      
+      session.endTime = DateTime.now();
+      session.isLockBlocked = true;
+      session.lockOwner = currentOwner;
+      session.exitReason = 'LOCKED';
+      session.durationMs = stopwatch.elapsedMilliseconds;
+      await _storage.updateScanSession(session);
+
       return ScanEngineResult(
         ok: false,
         successCount: 0,
@@ -86,7 +108,11 @@ class ScanEngine {
       final updatedConfigs = List<SearchConfig>.from(searches);
       final List<String> seenIdsList = await _storage.getSeenIds();
       final Set<String> seenIds = Set<String>.from(seenIdsList);
-      
+      debugPrint('[SCAN_DEBUG] seenIds count=${seenIds.length}');
+      debugPrint(
+        '[SCAN_DEBUG] seenIds sample=${seenIds.take(10).toList()}',
+      );
+
       List<int> slotsToScan;
       if (singleId != null) {
         final idx = updatedConfigs.indexWhere((s) => s.id == singleId);
@@ -100,53 +126,109 @@ class ScanEngine {
             .toList();
       }
 
+      session.activeFiltersCount = slotsToScan.length;
+      await _storage.updateScanSession(session);
+
       String globalError = '';
       bool criticalFailure = false;
 
       for (var i = 0; i < slotsToScan.length; i++) {
         if (_cancelRequested) {
           debugPrint('[SCAN] Cancelled by user');
+          session.exitReason = 'CANCELLED';
           break;
         }
 
         final configIndex = slotsToScan[i];
         final config = updatedConfigs[configIndex];
+        final filterStopwatch = Stopwatch()..start();
         
+        final filterDiag = FilterDiagnostic(
+          filterName: config.name,
+          brand: config.znamka,
+          model: config.model,
+          url: buildAvtonetResultsUrl(config),
+          urlParams: buildAvtonetUrlParams(config),
+        );
+        filterDiag.startTime = DateTime.now();
+        session.filters.add(filterDiag);
+        await _storage.updateScanSession(session);
+
         onProgress(i + 1, slotsToScan.length, config.name, 'Skeniranje...');
-        debugPrint('[SCRAPER] ${config.name}');
+        debugPrint('[SCAN_FILTER] START filter=${config.name}');
 
         try {
-          final result = await _scraper.scrapeSearchUrl(config, method: method, seenIds: seenIds.toList());
+          final result = await _scraper.scrapeSearchUrl(
+            config, 
+            method: method, 
+            seenIds: seenIds.toList(),
+            onPageLog: (p) {
+              filterDiag.pages.add(p);
+              _storage.updateScanSession(session);
+            },
+          );
+
+          filterDiag.usedWebView = result.usedWebView;
+          filterDiag.usedHttpClientFallback = result.usedHttpClient;
+          filterDiag.httpStatus = result.httpStatus;
+          filterDiag.pagesChecked = result.pages;
 
           if (result.ok) {
             successCount++;
+
+            // scrapeSearchUrl() already returns only new ads found
+            // under the exact Avto.net URL.
+            //
+            // The URL is the source of truth for all filters.
+            // DO NOT use FilterMatcher here.
             final parsed = result.listings;
             final matched = <CarListing>[];
 
+            debugPrint(
+              '[SCAN_FILTER] URL_RESULTS filter=${config.name} '
+              'newListingsFromUrl=${parsed.length}',
+            );
+
             for (final rawListing in parsed) {
-              final match = FilterMatcher.matches(rawListing, config);
-              if (match.isMatch) {
-                if (!seenIds.contains(rawListing.id)) {
-                  debugPrint('[FORENSIC] New Match Found: ${config.name}, ID: ${rawListing.id}');
-                  matched.add(rawListing);
-                  
-                  final notified = await _notifications.notifyNewAd(rawListing);
-                  debugPrint('[FORENSIC] notifyNewAd result for ID ${rawListing.id}: $notified');
-                  
-                  if (notified) {
-                    notificationsSent++;
-                  }
-                }
+              // Additional protection against race/duplicate situations.
+              // Scraper already filters against seenIds, but checking here
+              // prevents duplicate notifications if state changes during scan.
+              if (seenIds.contains(rawListing.id)) {
+                debugPrint(
+                  '[SCAN_FILTER] SKIP_ALREADY_SEEN '
+                  'id=${rawListing.id} '
+                  'title="${rawListing.title}"',
+                );
+                continue;
+              }
+
+              matched.add(rawListing);
+
+              debugPrint(
+                '[SCAN_FILTER] NEW_URL_RESULT '
+                'id=${rawListing.id} '
+                'title="${rawListing.title}"',
+              );
+
+              final notified = await _notifications.notifyNewAd(rawListing);
+              if (notified) {
+                notificationsSent++;
               }
             }
 
             totalNewFound += matched.length;
-            debugPrint('[SCRAPER] ${matched.length} new ads');
-            
+
+            filterDiag.status = 'SUCCESS';
+            filterDiag.adsFound = result.totalFound;
+            filterDiag.newAdsFound = matched.length;
+            filterDiag.knownAdsFound = result.totalFound - matched.length;
+
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
-              lastStatus: matched.isNotEmpty ? 'Najdeno: ${matched.length} novih' : 'Brez novih',
-              lastParsedCount: parsed.length,
+              lastStatus: matched.isNotEmpty
+                  ? 'Najdeno: ${matched.length} novih'
+                  : 'Brez novih',
+              lastParsedCount: result.totalFound,
               lastMatchedCount: matched.length,
             );
 
@@ -157,13 +239,12 @@ class ScanEngine {
               final toAdd = <CarListing>[];
               final idsToAdd = <String>[];
 
-              for (var l in matched) {
-                if (!currentInStorage.any((existing) => existing.id == l.id)) {
-                  toAdd.add(l);
+              for (final listing in matched) {
+                if (!currentInStorage.any((existing) => existing.id == listing.id)) {
+                  toAdd.add(listing);
                 }
-                if (!seenIds.contains(l.id)) {
-                  debugPrint('[FORENSIC] Marking ${l.id} as SEEN (adding to idsToAdd)');
-                  idsToAdd.add(l.id);
+                if (!seenIds.contains(listing.id)) {
+                  idsToAdd.add(listing.id);
                 }
               }
 
@@ -175,9 +256,20 @@ class ScanEngine {
                 seenIds.addAll(idsToAdd);
               }
             }
+            debugPrint(
+              '[SCAN_FILTER] COMPLETE '
+              'filter=${config.name} '
+              'duration=${filterStopwatch.elapsed.inSeconds}s '
+              'new=${matched.length}',
+            );
           } else {
             failCount++;
-            debugPrint('[SCRAPER] [WARN] ${config.name} failed: ${result.status.name}');
+            filterDiag.status = 'FAILURE';
+            filterDiag.reason = result.status.name;
+            filterDiag.error = result.error;
+            filterDiag.cloudflareDetected = result.status == ScrapeStatus.cloudflareBlocked;
+
+            debugPrint('[SCAN_FILTER] FAILED filter=${config.name} duration=${filterStopwatch.elapsed.inSeconds}s error=${result.status.name}');
             updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
               lastChecked: DateTime.now(),
               lastStatus: 'Napaka: ${result.status.name}',
@@ -194,19 +286,32 @@ class ScanEngine {
             }
           }
         } catch (e, stack) {
-          debugPrint('[SCRAPER] [ERROR] Loop exception for ${config.name}: $e');
-          if (stack != null) debugPrint(stack.toString());
+          debugPrint('[SCAN_FILTER] FAILED filter=${config.name} duration=${filterStopwatch.elapsed.inSeconds}s error=EXCEPTION: $e');
           failCount++;
+          filterDiag.status = 'FAILURE';
+          filterDiag.reason = 'EXCEPTION';
+          filterDiag.error = e.toString();
+          filterDiag.stackTrace = stack.toString();
+
           updatedConfigs[configIndex] = updatedConfigs[configIndex].copyWith(
             lastChecked: DateTime.now(),
             lastStatus: 'Sistemska napaka',
           );
+        } finally {
+          filterDiag.endTime = DateTime.now();
+          await _storage.updateScanSession(session);
         }
       }
 
       stopwatch.stop();
       debugPrint('[NOTIFICATION] $notificationsSent notifications shown');
       debugPrint('[SCAN] Finished in ${stopwatch.elapsed.inSeconds}s. Total new ads: $totalNewFound');
+
+      session.endTime = DateTime.now();
+      session.durationMs = stopwatch.elapsedMilliseconds;
+      session.totalNewAds = totalNewFound;
+      session.exitReason = criticalFailure ? 'CRITICAL_FAILURE' : (failCount > 0 ? 'PARTIAL_FAILURE' : 'SUCCESS');
+      await _storage.updateScanSession(session);
 
       return ScanEngineResult(
         ok: !criticalFailure && failCount < slotsToScan.length,
@@ -219,11 +324,15 @@ class ScanEngine {
       );
     } catch (e, stack) {
       debugPrint('[SCAN] [ERROR] Critical error during scan: $e');
+      session.endTime = DateTime.now();
+      session.exitReason = 'EXCEPTION';
+      session.durationMs = stopwatch.elapsedMilliseconds;
+      await _storage.updateScanSession(session);
       if (stack != null) debugPrint(stack.toString());
       debugPrint('[SCAN] Failed (Exception)');
       rethrow;
     } finally {
-      await _storage.releaseScanLock();
+      await _storage.releaseScanLock(lockOwnerId);
     }
   }
 }

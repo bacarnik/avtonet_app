@@ -31,6 +31,7 @@ class _SearchTabState extends State<SearchTab> {
   @override
   void initState() {
     super.initState();
+    c.addListener(_onControllerChanged);
     _nameCtrl = TextEditingController(text: c.draftSearchName);
     _kmMinCtrl = TextEditingController(text: c.kmMinText);
     _kmMaxCtrl = TextEditingController(text: c.kmMaxText);
@@ -44,6 +45,7 @@ class _SearchTabState extends State<SearchTab> {
 
   @override
   void dispose() {
+    c.removeListener(_onControllerChanged);
     _nameCtrl.dispose();
     _kmMinCtrl.dispose();
     _kmMaxCtrl.dispose();
@@ -54,6 +56,12 @@ class _SearchTabState extends State<SearchTab> {
     _mocMinCtrl.dispose();
     _mocMaxCtrl.dispose();
     super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (_nameCtrl.text != c.draftSearchName) {
+      _nameCtrl.text = c.draftSearchName;
+    }
   }
 
   @override

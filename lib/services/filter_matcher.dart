@@ -14,30 +14,60 @@ class FilterMatcher {
   static FilterMatchResult matches(CarListing listing, SearchConfig config) {
     // 1. Brand matching
     if (config.znamka.isNotEmpty) {
-      if (!StringUtils.contains(listing.title, config.znamka)) {
+      final titleLower = listing.title.toLowerCase();
+      final brandLower = config.znamka.toLowerCase();
+      
+      bool brandMatch = false;
+      // Precise word boundary check
+      final reg = RegExp('\\b${RegExp.escape(brandLower)}\\b');
+      brandMatch = reg.hasMatch(titleLower);
+
+      // Specific synonym handling for Volkswagen
+      if (!brandMatch && brandLower == 'volkswagen') {
+        brandMatch = titleLower.contains(RegExp(r'\bvw\b'));
+      }
+
+      if (!brandMatch) {
         return FilterMatchResult(isMatch: false, reason: 'Znamka mismatch: ${listing.title} vs ${config.znamka}');
       }
     }
 
     // 2. Model matching
     if (config.model.isNotEmpty) {
-      bool modelMatch = StringUtils.contains(listing.title, config.model);
+      final titleLower = listing.title.toLowerCase();
       
-      // LENIENT MATCHING for BMW (Serija 3 -> "320", "318", " 3 ")
-      if (!modelMatch && config.znamka.toLowerCase() == 'bmw' && config.model.toLowerCase().contains('serija')) {
-        final parts = config.model.split(' ');
+      // Use subModelGroup if available (for "(vsi)" groups), otherwise use display model name
+      final String criteria = (config.subModelGroup != null && config.subModelGroup!.isNotEmpty)
+          ? config.subModelGroup!
+          : config.model;
+
+      // Clean criteria: remove "(vsi)" and trailing colons for flexible matching
+      String modelLower = criteria.toLowerCase().replaceAll('(vsi)', '').trim();
+      if (modelLower.endsWith(':')) {
+        modelLower = modelLower.substring(0, modelLower.length - 1).trim();
+      }
+
+      bool modelMatch = titleLower.contains(modelLower);
+      
+      if (config.subModelGroup != null && config.subModelGroup!.isNotEmpty) {
+        debugPrint('[MATCH_GROUP_DEBUG] configGroup="${config.subModelGroup}" title="${listing.title}" result=$modelMatch');
+      }
+      
+      // LENIENT MATCHING for BMW (Serija 3 -> "320", "318", " 3 ", "M3")
+      if (!modelMatch && config.znamka.toLowerCase() == 'bmw' && modelLower.contains('serija')) {
+        final parts = modelLower.split(' ');
         if (parts.length >= 2) {
           final seriesNum = parts.last;
-          // Matches "320", "330", or " 3 "
-          final reg = RegExp(' $seriesNum\\d*\\b|\\b$seriesNum\\d* ');
-          modelMatch = listing.title.contains(reg) || listing.title.contains(' $seriesNum ');
+          // Matches "320", "330", " 3 " OR "M3", "X3"
+          final reg = RegExp('\\b$seriesNum\\d*\\b|\\b[a-zA-Z]$seriesNum\\b');
+          modelMatch = titleLower.contains(reg);
         }
       }
 
-      // LENIENT MATCHING for Mercedes-Benz (Razred C -> " C ", "CLA", etc. is harder, but let's try)
-      if (!modelMatch && config.znamka.toLowerCase() == 'mercedes-benz' && config.model.toLowerCase().contains('razred')) {
-        final seriesChar = config.model.split(' ').last;
-        modelMatch = listing.title.contains(' $seriesChar ') || listing.title.startsWith('$seriesChar ');
+      // LENIENT MATCHING for Mercedes-Benz (Razred C -> " C ", "CLA", etc.)
+      if (!modelMatch && config.znamka.toLowerCase() == 'mercedes-benz' && modelLower.contains('razred')) {
+        final seriesChar = modelLower.split(' ').last;
+        modelMatch = titleLower.contains(RegExp('\\b$seriesChar\\b'));
       }
 
       if (!modelMatch) {
@@ -53,6 +83,12 @@ class FilterMatcher {
       }
       if (config.cenaMax != null && priceInt > config.cenaMax!) {
         return FilterMatchResult(isMatch: false, reason: 'Cena previsoka: $priceInt > ${config.cenaMax}');
+      }
+    } else {
+      // "Cena po dogovoru" or other non-numeric text.
+      // If user specified ANY price limit, we reject unknown prices to be safe.
+      if (config.cenaMin != null || config.cenaMax != null) {
+        return FilterMatchResult(isMatch: false, reason: 'Cena ni številčna, filter pa je aktiven');
       }
     }
 

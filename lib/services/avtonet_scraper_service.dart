@@ -7,6 +7,7 @@ import 'package:html/parser.dart' show parse;
 
 import '../models/car_listing.dart';
 import '../models/search_config.dart';
+import '../models/scan_diagnostic.dart';
 import '../parsers/avtonet_html_parser.dart';
 import '../utils/url_builder.dart';
 import 'log_service.dart';
@@ -30,11 +31,25 @@ class ScrapeResult {
   final ScrapeStatus status;
   final int pages;
   final int totalFound;
+  final int? httpStatus;
+  final bool usedWebView;
+  final bool usedHttpClient;
 
-  ScrapeResult.success(this.listings, {this.status = ScrapeStatus.success, this.pages = 0, this.totalFound = 0})
-      : ok = true, error = '';
-  ScrapeResult.failure(this.error, {this.status = ScrapeStatus.networkError})
-      : ok = false, listings = [], pages = 0, totalFound = 0;
+  ScrapeResult.success(this.listings, {
+    this.status = ScrapeStatus.success, 
+    this.pages = 0, 
+    this.totalFound = 0,
+    this.httpStatus = 200,
+    this.usedWebView = false,
+    this.usedHttpClient = false,
+  }) : ok = true, error = '';
+  
+  ScrapeResult.failure(this.error, {
+    this.status = ScrapeStatus.networkError,
+    this.httpStatus,
+    this.usedWebView = false,
+    this.usedHttpClient = false,
+  }) : ok = false, listings = [], pages = 0, totalFound = 0;
 }
 
 class CloudflareBlockedException implements Exception {
@@ -91,48 +106,58 @@ class AvtonetScraperService {
   }
 
   Future<String> fetchHtml(String url, {Duration? timeout}) async {
-    return _fetch(url, method: 'GET', timeout: timeout);
+    return (await _fetch(url, method: 'GET', timeout: timeout)).html;
   }
 
-  Future<String> _fetch(String url, {required String method, Duration? timeout}) async {
-    if (method == 'WORKER') {
-      debugPrint('[PAGE HEADLESS] useWebView=$useWebView ready=$_ready');
-    }
+  Future<({String html, int? statusCode, bool webView, String? webViewError})> _fetch(String url, {required String method, Duration? timeout}) async {
+    final effectiveTimeout = timeout ?? 
+      (method == 'WORKER' ? const Duration(seconds: 30) : WebviewStealthConfig.pageLoadTimeout);
 
+    String? webViewError;
     if (useWebView) {
       if (!_ready) {
-        if (method == 'WORKER') debugPrint('[WORKER FETCH] Re-initializing WebView');
         _initController();
       }
 
       if (_ready) {
         try {
-          if (method == 'WORKER') debugPrint('[WORKER FETCH START] WebView');
-          return await _fetchWithWebView(url);
+          if (method == 'WORKER') debugPrint('[SCAN_FILTER] FETCH START (WebView)');
+          final html = await _fetchWithWebView(url, timeout: effectiveTimeout);
+          return (html: html, statusCode: 200, webView: true, webViewError: null);
         } catch (e) {
+          webViewError = e.toString();
           if (method == 'WORKER') {
-            debugPrint('[WORKER FETCH FAILED] WebView error: $e');
-          } else {
-            debugPrint('[SCRAPER] [WARN] WebView fetch failed, falling back to HttpClient: $e');
+            final err = webViewError.toLowerCase();
+            if (err.contains('timeout')) {
+              debugPrint('[SCAN_FILTER] WEBVIEW TIMEOUT url=$url');
+            } else if (err.contains('cloudflare') || err.contains('challenge')) {
+              debugPrint('[SCAN_FILTER] CLOUDFLARE url=$url');
+            }
           }
         }
-      } else {
-        if (method == 'WORKER') debugPrint('[WORKER FETCH] WebView NOT READY after init');
       }
     }
     
-    if (method == 'WORKER') debugPrint('[WORKER FETCH START] HttpClient');
+    if (method == 'WORKER') debugPrint('[SCAN_FILTER] FETCH START (HttpClient)');
     try {
-      final html = await _fetchSimple(url, timeout: timeout);
-      if (method == 'WORKER') debugPrint('[WORKER FETCH SUCCESS] HttpClient');
-      return html;
+      final res = await _fetchSimple(url, timeout: effectiveTimeout);
+      return (html: res.html, statusCode: res.statusCode, webView: false, webViewError: webViewError);
     } catch (e) {
-      if (method == 'WORKER') debugPrint('[WORKER FETCH FAILED] HttpClient: $e');
+      if (method == 'WORKER') {
+        final err = e.toString().toLowerCase();
+        if (err.contains('cloudflare') || err.contains('403')) {
+          debugPrint('[SCAN_FILTER] CLOUDFLARE url=$url (HttpClient)');
+        }
+      }
+      // Re-wrap error if we have WebView context
+      if (webViewError != null) {
+        throw Exception('HttpClient error after WebView failed ($webViewError): $e');
+      }
       rethrow;
     }
   }
 
-  Future<String> _fetchSimple(String url, {Duration? timeout}) async {
+  Future<({String html, int statusCode})> _fetchSimple(String url, {Duration? timeout}) async {
     final effectiveTimeout = timeout ?? WebviewStealthConfig.pageLoadTimeout;
     final client = HttpClient();
     client.connectionTimeout = effectiveTimeout;
@@ -163,25 +188,28 @@ class AvtonetScraperService {
       }
 
       client.close();
-      return html;
+      return (html: html, statusCode: statusCode);
     } catch (e) {
       client.close();
       rethrow;
     }
   }
 
-  Future<String> _fetchWithWebView(String url) async {
+  Future<String> _fetchWithWebView(String url, {Duration? timeout}) async {
     if (!_ready) throw Exception('WebView not initialized');
     _pageLoadCompleter = Completer<void>();
+    
+    final effectiveTimeout = timeout ?? WebviewStealthConfig.pageLoadTimeout;
     
     await controller.loadRequest(Uri.parse(url), headers: WebviewStealthConfig.navigationHeaders(referer: 'https://www.avto.net/'));
     
     try {
-      await _pageLoadCompleter!.future.timeout(WebviewStealthConfig.pageLoadTimeout);
+      await _pageLoadCompleter!.future.timeout(effectiveTimeout);
       
+      final startTime = DateTime.now();
       if (url.contains('search.asp')) {
-        // Robust wait for models to populate (jQuery.chained)
         for (int i = 0; i < 20; i++) {
+          if (DateTime.now().difference(startTime) > effectiveTimeout) break;
           try {
             final result = await controller.runJavaScriptReturningResult(
               "document.querySelectorAll('#model option').length"
@@ -192,15 +220,12 @@ class AvtonetScraperService {
           await Future.delayed(const Duration(milliseconds: 500));
         }
       } else {
-        bool containersFound = false;
         for (int i = 0; i < 10; i++) {
+          if (DateTime.now().difference(startTime) > effectiveTimeout) break;
           final check = await controller.runJavaScriptReturningResult(
             "document.querySelectorAll('div.GO-Results-Row, div.GO-Results-Top-Ponudba, .GO-Results-Main').length > 0"
           );
-          if (check == true) {
-            containersFound = true;
-            break;
-          }
+          if (check == true) break;
           await Future.delayed(const Duration(seconds: 1));
         }
       }
@@ -209,7 +234,7 @@ class AvtonetScraperService {
       String decodedHtml = _decodeWebViewHtml(html);
       
       if (AvtonetHtmlParser.isCloudflareChallenge(decodedHtml)) {
-        throw Exception('Cloudflare Challenge');
+        throw CloudflareBlockedException('Cloudflare Challenge');
       }
 
       return decodedHtml;
@@ -242,20 +267,26 @@ class AvtonetScraperService {
                .replaceAll('\\"', '"');
   }
 
-  Future<ScrapeResult> scrapeSearchUrl(SearchConfig config, {required String method, List<String> seenIds = const []}) async {
+  Future<ScrapeResult> scrapeSearchUrl(
+    SearchConfig config, {
+    required String method, 
+    List<String> seenIds = const [],
+    void Function(PageDiagnostic)? onPageLog,
+  }) async {
     final List<CarListing> allNewListings = [];
     int totalChecked = 0;
     int totalPages = 0;
     final Set<String> seenInThisScan = {};
     
-    int consecutiveSeen = 0;
-    const int earlyStopThreshold = 15;
-    String stopReason = 'Unknown';
+    int consecutiveEmptyPages = 0;
+    const int earlyStopPageThreshold = 3;
+
+    bool usedWebView = false;
+    bool usedHttpClient = false;
 
     try {
       final String baseUrl = buildAvtonetResultsUrl(config);
-      debugPrint('[SCRAPER] Starting forensic scan for: ${config.name}');
-      debugPrint('[SCRAPER] URL: $baseUrl');
+      if (method == 'WORKER') debugPrint('[SCAN_FILTER] URL=$baseUrl');
 
       pageLoop:
       for (int page = 1; page <= 21; page++) {
@@ -266,35 +297,65 @@ class AvtonetScraperService {
           pageUrl = '$pageUrl&stran=$page';
         }
         
-        debugPrint('[SCRAPER] Fetching Page $page: $pageUrl');
+        if (method == 'WORKER') debugPrint('[SCAN_FILTER] PAGE $page START');
+        final pageStopwatch = Stopwatch()..start();
         
         String? html;
-        // Retry logic for any page
-        for (int retry = 0; retry <= 2; retry++) {
+        int? httpStatus;
+        bool isWebView = false;
+        String? wvError;
+
+        final maxRetries = (method == 'WORKER') ? 1 : 2;
+        
+        for (int retry = 0; retry <= maxRetries; retry++) {
           try {
-            html = await _fetch(pageUrl, method: method);
-            break; // Success
-          } on CloudflareBlockedException {
-            debugPrint('[SCRAPER] [ERROR] Cloudflare blocked Page $page');
-            return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
+            final fetchRes = await _fetch(pageUrl, method: method);
+            html = fetchRes.html;
+            httpStatus = fetchRes.statusCode;
+            isWebView = fetchRes.webView;
+            wvError = fetchRes.webViewError;
+            if (isWebView) usedWebView = true; else usedHttpClient = true;
+            break; 
+          } on CloudflareBlockedException catch (e) {
+            String errorMsg = 'CLOUDFLARE: ${e.message}';
+            if (usedHttpClient && wvError != null) {
+              errorMsg = 'HTTPCLIENT_CLOUDFLARE_AFTER_WEBVIEW_FAILURE (WV Error: $wvError)';
+            }
+
+            if (onPageLog != null) {
+              onPageLog(PageDiagnostic(
+                pageNumber: page,
+                url: pageUrl,
+                method: isWebView ? 'WebView' : 'HttpClient',
+                httpStatus: 403,
+                adsFound: 0, newAdsFound: 0, knownAdsFound: 0,
+                hasNextPage: false,
+                error: errorMsg,
+                webViewError: wvError,
+              ));
+            }
+            return ScrapeResult.failure(errorMsg, status: ScrapeStatus.cloudflareBlocked, httpStatus: 403, usedWebView: usedWebView, usedHttpClient: usedHttpClient);
           } catch (e) {
-            final errStr = e.toString().toLowerCase();
-            if (errStr.contains('403') || errStr.contains('cloudflare')) {
-              debugPrint('[SCRAPER] [ERROR] 403/Cloudflare Page $page');
-              return ScrapeResult.failure('Cloudflare Blocked', status: ScrapeStatus.cloudflareBlocked);
+            if (retry == maxRetries) {
+              if (onPageLog != null) {
+                onPageLog(PageDiagnostic(
+                  pageNumber: page,
+                  url: pageUrl,
+                  method: usedHttpClient ? 'HttpClient' : 'WebView',
+                  httpStatus: httpStatus,
+                  adsFound: 0, newAdsFound: 0, knownAdsFound: 0,
+                  hasNextPage: false,
+                  error: e.toString(),
+                  webViewError: wvError,
+                ));
+              }
+              return ScrapeResult.failure('Network error: $e', status: ScrapeStatus.networkError, usedWebView: usedWebView, usedHttpClient: usedHttpClient);
             }
-            if (retry == 2) {
-              debugPrint('[SCRAPER] [ERROR] Network error Page $page: $e');
-              return ScrapeResult.failure('Network error: $e', status: ScrapeStatus.networkError);
-            }
-            debugPrint('[SCRAPER] [WARN] Page $page retry $retry/2: $e');
             await Future.delayed(Duration(seconds: 2 * (retry + 1)));
           }
         }
 
         if (html == null || html.isEmpty) {
-          debugPrint('[SCRAPER] Page $page returned empty HTML');
-          stopReason = 'Empty HTML on page $page';
           break pageLoop;
         }
 
@@ -305,13 +366,10 @@ class AvtonetScraperService {
         });
 
         final pagination = await compute(_parsePaginationInBackground, html);
-        debugPrint('[SCRAPER] Page $page results: ${pageListings.length} items. Pagination: $pagination');
         
-        if (pageListings.isEmpty) {
-          debugPrint('[SCRAPER] Stop: No listings on Page $page');
-          stopReason = 'Zero listings on page $page';
-          break pageLoop;
-        }
+        int pageNew = 0;
+        int pageKnown = 0;
+        bool foundNewAdOnThisPage = false;
 
         for (var listing in pageListings) {
           if (!seenInThisScan.add(listing.id)) continue;
@@ -319,48 +377,73 @@ class AvtonetScraperService {
 
           if (!seenIds.contains(listing.id)) {
             allNewListings.add(listing);
-            consecutiveSeen = 0;
+            pageNew++;
+            foundNewAdOnThisPage = true;
           } else {
-            if (!listing.isTopOffer) {
-              consecutiveSeen++;
-            }
+            pageKnown++;
           }
+        }
 
-          if (consecutiveSeen >= earlyStopThreshold) {
-            debugPrint('[SCRAPER] Stop: Reached early-stop threshold (known ads)');
-            stopReason = 'Early stop (known ads)';
-            break pageLoop;
-          }
+        if (onPageLog != null) {
+          onPageLog(PageDiagnostic(
+            pageNumber: page,
+            url: pageUrl,
+            method: isWebView ? 'WebView' : 'HttpClient',
+            httpStatus: httpStatus,
+            adsFound: pageListings.length,
+            newAdsFound: pageNew,
+            knownAdsFound: pageKnown,
+            hasNextPage: pagination.hasNext,
+          ));
+        }
+
+        if (method == 'WORKER') {
+          debugPrint('[SCAN_FILTER] PAGE $page RESULTS=${pageListings.length} NEW=$pageNew duration=${pageStopwatch.elapsed.inSeconds}s');
+        }
+        
+        if (pageListings.isEmpty) {
+          break pageLoop;
         }
 
         totalPages++;
 
+        // Early stop logic at PAGE level
+        if (foundNewAdOnThisPage) {
+          consecutiveEmptyPages = 0;
+        } else {
+          // If no new ads found on this page, increment counter
+          consecutiveEmptyPages++;
+        }
+
+        if (consecutiveEmptyPages >= earlyStopPageThreshold) {
+          if (method == 'WORKER') debugPrint('[SCAN_FILTER] Early stop reached after $earlyStopPageThreshold empty pages');
+          break pageLoop;
+        }
+
         if (pageListings.length < 10) { 
-          debugPrint('[SCRAPER] Stop: Page $page has < 10 items, assuming last page.');
-          stopReason = 'Last page reached (small count)';
           break pageLoop;
         }
 
         if (!pagination.hasNext) {
-          debugPrint('[SCRAPER] Stop: Pagination hasNext = false');
-          stopReason = 'No next page';
           break pageLoop;
         }
 
         if (pagination.totalPages > 1 && page >= pagination.totalPages) {
-          debugPrint('[SCRAPER] Stop: Reached pagination limit ($page/${pagination.totalPages})');
-          stopReason = 'Reached pagination limit';
           break pageLoop;
         }
       }
 
-      debugPrint('[SCRAPER] Forensic scan finished. Total pages: $totalPages, Total items: $totalChecked, Reason: $stopReason');
-      return ScrapeResult.success(allNewListings, pages: totalPages, totalFound: totalChecked);
+      return ScrapeResult.success(
+        allNewListings, 
+        pages: totalPages, 
+        totalFound: totalChecked, 
+        usedWebView: usedWebView,
+        usedHttpClient: usedHttpClient,
+      );
 
     } catch (e, stack) {
-      debugPrint('[SCRAPER] [ERROR] Scrape exception for config ${config.name}: $e');
       if (stack != null) debugPrint(stack.toString());
-      return ScrapeResult.failure(e.toString());
+      return ScrapeResult.failure(e.toString(), usedWebView: usedWebView, usedHttpClient: usedHttpClient);
     }
   }
 }
