@@ -20,10 +20,10 @@ class BodyTypeGrid extends StatelessWidget {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
+        crossAxisCount: 3,
         mainAxisSpacing: 8,
         crossAxisSpacing: 8,
-        childAspectRatio: 0.85,
+        childAspectRatio: 2.2,
       ),
       itemCount: kBodyTypes.length,
       itemBuilder: (context, index) {
@@ -47,29 +47,17 @@ class BodyTypeGrid extends StatelessWidget {
                 width: 1.5,
               ),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  opt.icon,
-                  size: 24,
-                  color: selected ? AppTheme.brandPurple : AppTheme.textMuted,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Center(
+              child: Text(
+                opt.label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                  color: selected ? AppTheme.brandPurple : AppTheme.white,
                 ),
-                const SizedBox(height: 6),
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    opt.label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                      color: selected ? AppTheme.brandPurple : AppTheme.white,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         );

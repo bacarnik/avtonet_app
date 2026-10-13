@@ -8,6 +8,65 @@ import '../data/body_types.dart';
 import '../data/filter_options.dart';
 import '../models/search_config.dart';
 
+bool matchesHistoryBrand(String title, String brand) {
+  if (brand.trim().isEmpty) return true;
+  final titleLower = title.toLowerCase();
+  final brandLower = brand.toLowerCase().trim();
+
+  try {
+    final escaped = RegExp.escape(brandLower);
+    final pattern = '(?<![\\p{L}\\p{N}])$escaped(?![\\p{L}\\p{N}])';
+    return RegExp(pattern, unicode: true).hasMatch(titleLower);
+  } catch (_) {
+    return titleLower.contains(brandLower);
+  }
+}
+
+bool matchesHistoryModel(CarListing listing, String filterModel, String filterMake) {
+  if (filterModel.trim().isEmpty) return true;
+
+  final titleLower = listing.title.toLowerCase();
+  final modelLowerRaw = filterModel.toLowerCase().trim();
+
+  final bool isGroup = modelLowerRaw.contains('(vsi)') ||
+                       modelLowerRaw.contains('(vse)');
+
+  String cleanModel = modelLowerRaw
+      .replaceAll(RegExp(r'\s*\((vsi|vse)\)\s*$', caseSensitive: false), '')
+      .trim();
+  if (cleanModel.endsWith(':')) {
+    cleanModel = cleanModel.substring(0, cleanModel.length - 1).trim();
+  }
+
+  if (cleanModel.isEmpty) return true;
+
+  bool isMatch = titleLower.contains(cleanModel);
+
+  if (!isMatch && isGroup) {
+    if (filterMake.toLowerCase() == 'bmw' && cleanModel.contains('serija')) {
+      final parts = cleanModel.split(' ');
+      if (parts.length >= 2) {
+        final seriesNum = parts.last;
+        final reg = RegExp('\\b$seriesNum\\d+[a-zA-Z]*\\b|\\b[a-zA-Z]?$seriesNum\\b');
+        isMatch = titleLower.contains(reg);
+      }
+    } else if (filterMake.toLowerCase() == 'mercedes-benz' && cleanModel.contains('razred')) {
+      final seriesChar = cleanModel.split(' ').last;
+      isMatch = titleLower.contains(RegExp('\\b$seriesChar\\b'));
+    }
+  }
+
+  if (!isMatch && !isGroup) {
+    String normalizedClean = cleanModel.replaceAll('é', 'e').replaceAll('è', 'e');
+    String normalizedTitle = titleLower.replaceAll('é', 'e').replaceAll('è', 'e');
+    if (normalizedTitle.contains(normalizedClean)) {
+      isMatch = true;
+    }
+  }
+
+  return isMatch;
+}
+
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key, required this.controller});
   final AppController controller;
@@ -254,17 +313,13 @@ class _HistoryTabState extends State<HistoryTab> {
   List<CarListing> _applyFiltersAndSort(List<CarListing> source, HistoryFilter hf) {
     final filtered = source.where((l) {
       if (hf.make.isNotEmpty) {
-        final titleLower = l.title.toLowerCase();
-        final makeLower = hf.make.toLowerCase();
-        bool makeMatch = titleLower.contains(RegExp('\\b${RegExp.escape(makeLower)}\\b'));
-        if (!makeMatch && makeLower == 'volkswagen') {
-          makeMatch = titleLower.contains(RegExp(r'\bvw\b'));
-        }
-        if (!makeMatch) return false;
+        if (!matchesHistoryBrand(l.title, hf.make)) return false;
       }
       
-      if (hf.model.isNotEmpty && !l.title.toLowerCase().contains(hf.model.toLowerCase())) return false;
-      
+      if (hf.model.isNotEmpty) {
+        if (!matchesHistoryModel(l, hf.model, hf.make)) return false;
+      }
+
       final price = int.tryParse(l.price.replaceAll(RegExp(r'\D'), ''));
       if (price != null) {
         if (hf.priceMin != null && price < hf.priceMin!) return false;
@@ -278,20 +333,17 @@ class _HistoryTabState extends State<HistoryTab> {
       }
 
       if (hf.bodyCode != 0) {
-        // Strict match if body type was successfully parsed
         if (l.bodyType != 0 && l.bodyType != hf.bodyCode) return false;
         
-        // If body type is unknown (0), we check if the search that found this ad 
-        // actually requested this body type.
         if (l.bodyType == 0) {
           final config = widget.controller.savedSearches.firstWhere(
             (s) => s.id == l.searchConfigId,
-            orElse: () => SearchConfig(id: '', name: '', znamka: ''),          );
+            orElse: () => SearchConfig(id: '', name: '', znamka: ''),
+          );
           if (config.id.isNotEmpty) {
             final configBodyCodes = config.oblika.split(',').map((e) => int.tryParse(e)).whereType<int>();
             if (!configBodyCodes.contains(hf.bodyCode)) return false;
           } else {
-            // No config info, and bodyType is 0, hide it from specific body filter
             return false;
           }
         }

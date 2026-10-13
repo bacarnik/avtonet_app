@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import '../models/search_config.dart';
 import '../data/filter_options.dart';
 
@@ -28,24 +27,24 @@ Map<String, String> buildAvtonetUrlParams(SearchConfig config) {
   final int? powerMinKw = _normalizePower(config.mocMin, config.powerUnit);
   final int? powerMaxKw = _normalizePower(config.mocMax, config.powerUnit);
 
-  debugPrint('[URL_MODEL_DEBUG] model=${config.model}');
-  debugPrint('[URL_MODEL_DEBUG] modelSearchValue=${config.modelSearchValue}');
-  debugPrint('[URL_MODEL_DEBUG] modelId=${config.modelId}');
-  debugPrint('[URL_MODEL_DEBUG] subModelGroup=${config.subModelGroup}');
-
-  String modelValue = '';
-  if (config.modelId != null && config.modelId!.isNotEmpty) {
-    modelValue = config.modelId!;
-  } else if (config.modelSearchValue.isNotEmpty) {
-    modelValue = config.modelSearchValue;
-  }
-
   final bool isGroup =
       config.subModelGroup != null &&
-      config.subModelGroup!.isNotEmpty;
+          config.subModelGroup!.isNotEmpty;
 
-  debugPrint('[URL_MODEL_DEBUG] finalModelValue=$modelValue');
-  debugPrint('[URL_MODEL_DEBUG] isGroup=$isGroup');
+  final bool isSubModel =
+      config.modelId == null &&
+          config.subModelGroup == null &&
+          config.modelSearchValue.isNotEmpty;
+
+  String modelValue = '';
+
+  if (!isSubModel) {
+    if (config.modelId != null && config.modelId!.isNotEmpty) {
+      modelValue = config.modelId!;
+    } else if (config.modelSearchValue.isNotEmpty) {
+      modelValue = config.modelSearchValue;
+    }
+  }
 
   // EQ9: groups have 9 digits (100000002), concrete models have 10 digits (1000000020)
   // KAT: 1012000000 is proven for used passenger car searches
@@ -56,8 +55,12 @@ Map<String, String> buildAvtonetUrlParams(SearchConfig config) {
   final params = <String, String>{
     'znamka': config.znamka,
     'model': modelValue,
-    'SUBmodelsearch': isGroup ? '' : modelValue,
-    'SUBmodgrp1': isGroup ? '0' : (config.subModelGroup ?? '0'),
+    'SUBmodelsearch': isGroup
+        ? ''
+        : (isSubModel ? config.modelSearchValue : modelValue),
+    'SUBmodgrp1': isSubModel
+        ? '0'
+        : (isGroup ? '0' : (config.subModelGroup ?? '0')),
     'cenaMin': '${config.cenaMin ?? 0}',
     'cenaMax': '${config.cenaMax ?? 999999}',
     'letnikMin': '${config.letnikMin ?? 0}',
@@ -88,7 +91,10 @@ Map<String, String> buildAvtonetUrlParams(SearchConfig config) {
 
   if (params['model'] == '') params.remove('model');
   if (params['SUBmodelsearch'] == '') params.remove('SUBmodelsearch');
-  if (params['SUBmodgrp1'] == '0') params.remove('SUBmodgrp1');
+
+  if (params['SUBmodgrp1'] == '0' && !isSubModel) {
+    params.remove('SUBmodgrp1');
+  }
 
   return params;
 }

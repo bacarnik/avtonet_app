@@ -21,7 +21,7 @@ class TrackerTab extends StatelessWidget {
 
         return Scaffold(
           appBar: AppBar(
-            title: const Text('avtonetFinder'),
+            title: const Text('AvtoNet Skener'),
             actions: [
               // Global Schedule Status Button
               IconButton(
@@ -47,13 +47,22 @@ class TrackerTab extends StatelessWidget {
               Expanded(
                 child: searches.isEmpty
                     ? _emptyState()
-                    : ListView.builder(
+                    : ReorderableListView.builder(
                         padding: const EdgeInsets.all(16),
+                        buildDefaultDragHandles: false,
                         itemCount: searches.length,
-                        itemBuilder: (context, i) => _TrackerCard(
-                          config: searches[i],
-                          controller: controller,
-                        ),
+                        onReorder: (oldIndex, newIndex) {
+                          controller.reorderSavedSearches(oldIndex, newIndex);
+                        },
+                        itemBuilder: (context, i) {
+                          final config = searches[i];
+                          return _TrackerCard(
+                            key: ValueKey(config.id),
+                            index: i,
+                            config: config,
+                            controller: controller,
+                          );
+                        },
                       ),
               ),
             ],
@@ -147,7 +156,14 @@ class TrackerTab extends StatelessWidget {
 }
 
 class _TrackerCard extends StatelessWidget {
-  const _TrackerCard({required this.config, required this.controller});
+  const _TrackerCard({
+    super.key,
+    required this.index,
+    required this.config,
+    required this.controller,
+  });
+
+  final int index;
   final SearchConfig config;
   final AppController controller;
 
@@ -168,6 +184,13 @@ class _TrackerCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
+                ReorderableDragStartListener(
+                  index: index,
+                  child: const Padding(
+                    padding: EdgeInsets.only(right: 12),
+                    child: Icon(Icons.drag_handle, size: 22, color: Colors.grey),
+                  ),
+                ),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,

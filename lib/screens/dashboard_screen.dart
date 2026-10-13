@@ -19,7 +19,7 @@ class DashboardScreen extends StatelessWidget {
       builder: (context, _) {
         return Scaffold(
           appBar: AppBar(
-            title: const Text('avtonetFinder Dashboard'),
+            title: const Text('AvtoNet Skener Dashboard'),
             actions: [
               IconButton(
                 icon: const Icon(Icons.bug_report_outlined, size: 20),

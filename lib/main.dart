@@ -84,7 +84,7 @@ class _AvtonetAppState extends State<AvtonetApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'avtonetFinder',
+      title: 'AvtoNet Skener',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
@@ -118,7 +118,7 @@ class _LoadingSplash extends StatelessWidget {
               const CircularProgressIndicator(color: AppTheme.brandPurple),
               const SizedBox(height: 24),
               Text(
-                'avtonetFinder',
+                'AvtoNet Skener',
                 style: TextStyle(
                   color: isDark ? Colors.white : Colors.black,
                   fontSize: 24,

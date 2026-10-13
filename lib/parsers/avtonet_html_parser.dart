@@ -1,4 +1,3 @@
-import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' show parse;
@@ -37,9 +36,9 @@ class AvtonetHtmlParser {
 
         final ariaLabel = link.attributes['aria-label']?.toLowerCase() ?? '';
         final text = link.text.toLowerCase();
-        
-        if (ariaLabel == 'next' || 
-            text.contains('naslednja') || 
+
+        if (ariaLabel == 'next' ||
+            text.contains('naslednja') ||
             link.querySelector('i.fa-chevron-right') != null) {
           hasNext = true;
           break;
@@ -92,7 +91,7 @@ class AvtonetHtmlParser {
     String brand = '',
     String model = '',
     String url = '',
-    List<String> seenIds = const [] ?? const [],
+    List<String> seenIds = const [],
   }) {
     if (isCloudflareChallenge(html)) return [];
 
@@ -108,9 +107,9 @@ class AvtonetHtmlParser {
       try {
         final titleEl = element.querySelector('div.GO-Results-Naziv');
         final anchorEl = element.querySelector('a.stretched-link');
-        final bool isTopOffer = element.attributes['class']?.contains('Top-Ponudba') ?? 
+        final bool isTopOffer = element.attributes['class']?.contains('Top-Ponudba') ??
                                 element.querySelector('.GO-Results-Top-Ponudba') != null;
-        
+
         String title = titleEl?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
         String href = anchorEl?.attributes['href'] ?? '';
 
@@ -124,13 +123,13 @@ class AvtonetHtmlParser {
 
         if (href.isEmpty) continue;
 
-        String link = href.startsWith('http') 
-            ? href 
+        String link = href.startsWith('http')
+            ? href
             : 'https://www.avto.net${href.startsWith('/') ? '' : '/'}$href';
 
         final idMatch = RegExp(r'id=(\d+)').firstMatch(link);
         final id = idMatch?.group(1);
-        
+
         if (id == null) continue;
         currentIdForError = id;
 
@@ -155,25 +154,13 @@ class AvtonetHtmlParser {
 
         final attrEl = element.querySelector('.GO-Results-Row-Data-Data, .GO-Results-Row-ATTRIBUTES, .GO-Results-Row-Data-Top');
         final scopeText = attrEl?.text ?? element.text;
-        
+
         final year = _extractYear(scopeText);
         final mileage = _extractMileage(scopeText, element, year);
         final fuel = _extractFuel(scopeText);
         final bodyType = _detectBodyType(title, scopeText);
         final power = _extractPower(scopeText);
-
-        var imageUrl = '';
-        final imgEl = element.querySelector('.GO-Results-Photo img, .ResultsPhoto img, img');
-        if (imgEl != null) {
-          imageUrl = imgEl.attributes['src'] ?? 
-                     imgEl.attributes['data-src'] ?? 
-                     imgEl.attributes['data-original'] ?? 
-                     imgEl.attributes['srcset']?.split(' ').first ??
-                     '';
-          if (imageUrl.isNotEmpty && !imageUrl.startsWith('http')) {
-            imageUrl = 'https://www.avto.net${imageUrl.startsWith('/') ? '' : '/'}$imageUrl';
-          }
-        }
+        final imageUrl = _extractImageUrl(element);
 
         results.add(CarListing(
           id: id,
@@ -252,52 +239,118 @@ class AvtonetHtmlParser {
     } catch (_) { return (kw: 0, hp: 0); }
   }
 
+  static String _extractImageUrl(dom.Element element) {
+    final imgEl = element.querySelector('.GO-Results-Photo img, .ResultsPhoto img, img');
+    if (imgEl == null) return '';
+
+    final candidates = <String?>[
+      imgEl.attributes['data-src'],
+      imgEl.attributes['data-original'],
+      imgEl.attributes['srcset']?.split(' ').first,
+      imgEl.attributes['src'],
+    ];
+
+    for (final raw in candidates) {
+      if (raw == null) continue;
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) continue;
+
+      final lower = trimmed.toLowerCase();
+      if (lower.contains('blank') ||
+          lower.contains('placeholder') ||
+          lower.startsWith('data:image') ||
+          lower.contains('no_photo') ||
+          lower.contains('no-photo') ||
+          lower.contains('clear.gif') ||
+          lower.contains('spacer.gif')) {
+        continue;
+      }
+
+      return _normalizeImageUrl(trimmed);
+    }
+
+    return '';
+  }
+
+  static String _normalizeImageUrl(String url) {
+    if (url.isEmpty) return '';
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    if (url.startsWith('//')) {
+      return 'https:$url';
+    }
+    if (url.startsWith('/')) {
+      return 'https://www.avto.net$url';
+    }
+    return 'https://www.avto.net/$url';
+  }
+
   static int _detectBodyType(String title, String scope) {
+    final titleLower = title.toLowerCase();
     final text = '$title $scope'.toLowerCase();
-    
-    // 1. Karavan / Station Wagon
-    if (text.contains('karavan') || text.contains('touring') || text.contains('variant') || 
-        text.contains('avant') || text.contains('wagon') ||
-        text.contains('shooting brake') || (text.contains('kombi') && !text.contains('kombilimuzina'))) return 13;
-    
-    // 2. Hatchback / Kombilimuzina / Compact
-    if (text.contains('hatchback') || text.contains('kombilimuzina') || text.contains('compact') || 
-        text.contains('sportback') || text.contains(' 3 vrat') || text.contains(' 5 vrat') || 
-        text.contains('berlina') || text.contains('clio') || text.contains('megane') || 
-        text.contains('golf') || text.contains('polo') || text.contains('astra') || 
-        text.contains('corsa') || text.contains('fiesta') || text.contains('focus') ||
-        text.contains('i20') || text.contains('i30') || text.contains('a3') || 
-        text.contains('yaris') || text.contains('auris')) return 12;
-    
-    // 3. Limuzina / Sedan / Saloon
-    if (text.contains('limuzina') || text.contains('sedan') || text.contains('saloon') || 
-        text.contains('stopenjska') || text.contains('tridelna')) return 11;
-    
-    // 4. SUV / Terensko / Crossover / 4x4
-    if (text.contains('suv') || text.contains('terensko') || text.contains('cross') || 
+
+    // 1. Explicit body type keywords in title have highest priority
+    if (titleLower.contains('coupe') || titleLower.contains('coupé')) return 16;
+    if (titleLower.contains('cabrio') || titleLower.contains('kabriolet') ||
+        titleLower.contains('spider') || titleLower.contains('roadster') ||
+        titleLower.contains('convertible')) return 17;
+    if (titleLower.contains('suv') || titleLower.contains('terensko') ||
+        titleLower.contains('crossover') || titleLower.contains('off-road')) return 15;
+    if (titleLower.contains('karavan') || titleLower.contains('touring') ||
+        titleLower.contains('variant') || titleLower.contains('avant') ||
+        titleLower.contains('shooting brake') || titleLower.contains('wagon')) return 13;
+    if (titleLower.contains('limuzina') || titleLower.contains('sedan') ||
+        titleLower.contains('saloon')) return 11;
+    if (titleLower.contains('enoprostorec') || titleLower.contains('mpv') ||
+        titleLower.contains('monovolumen') || titleLower.contains('minivan')) return 14;
+    if (titleLower.contains('pick-up') || titleLower.contains('pickup') ||
+        titleLower.contains('poltovornjak')) return 18;
+
+    // 2. Specific body types checked on combined text
+    // Coupe
+    if (text.contains('coupe') || text.contains('coupé')) return 16;
+
+    // Cabrio / Kabriolet / Spider / Roadster
+    if (text.contains('cabrio') || text.contains('kabriolet') || text.contains('spider') ||
+        text.contains('convertible') || text.contains('roadster')) return 17;
+
+    // SUV / Terensko / Crossover / 4x4
+    if (text.contains('suv') || text.contains('terensko') || text.contains('cross') ||
         text.contains('off-road') || text.contains('4x4') || text.contains('allroad') ||
         text.contains('crossover') || text.contains('stirikolesni')) return 15;
-    
-    // 5. Coupe
-    if (text.contains('coupe') || text.contains('coupé')) return 16;
-    
-    // 6. Cabrio / Kabriolet / Spider / Roadster
-    if (text.contains('cabrio') || text.contains('kabriolet') || text.contains('spider') || 
-        text.contains('convertible') || text.contains('roadster')) return 17;
-    
-    // 7. Enoprostorec / MPV / Van / Minivan
-    if (text.contains('enoprostorec') || text.contains('mpv') || text.contains('monovolumen') || 
+
+    // Karavan / Station Wagon
+    if (text.contains('karavan') || text.contains('touring') || text.contains('variant') ||
+        text.contains('avant') || text.contains('wagon') ||
+        text.contains('shooting brake') || (text.contains('kombi') && !text.contains('kombilimuzina'))) return 13;
+
+    // Limuzina / Sedan / Saloon
+    if (text.contains('limuzina') || text.contains('sedan') || text.contains('saloon') ||
+        text.contains('stopenjska') || text.contains('tridelna')) return 11;
+
+    // Enoprostorec / MPV / Van / Minivan
+    if (text.contains('enoprostorec') || text.contains('mpv') || text.contains('monovolumen') ||
         text.contains('grand') || text.contains('space') || text.contains('minivan')) return 14;
-    
-    // 8. Pick-up / Poltovornjak
+
+    // Pick-up / Poltovornjak
     if (text.contains('pick-up') || text.contains('poltovornjak') || text.contains('pickup')) return 18;
 
-    // 9. Delivery / Cargo / Furgon
-    if (text.contains('tovorno') || text.contains('furgon') || text.contains('van')) return 14;
+    // Delivery / Cargo / Furgon
+    if (text.contains('tovorno') || text.contains('furgon')) return 14;
+
+    // Hatchback / Kombilimuzina / Compact (checked last as generic fallback)
+    if (text.contains('hatchback') || text.contains('kombilimuzina') || text.contains('compact') ||
+        text.contains('sportback') || text.contains(' 3 vrat') || text.contains(' 5 vrat') ||
+        text.contains('berlina') || text.contains('clio') || text.contains('megane') ||
+        text.contains('golf') || text.contains('polo') || text.contains('astra') ||
+        text.contains('corsa') || text.contains('fiesta') || text.contains('focus') ||
+        text.contains('i20') || text.contains('i30') || text.contains('a3') ||
+        text.contains('yaris') || text.contains('auris')) return 12;
 
     return 0;
   }
-  
+
   static String _bodyTypeToLabel(int code) {
     switch (code) {
       case 11: return 'Limuzina';

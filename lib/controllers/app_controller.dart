@@ -58,6 +58,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   HistoryFilter historyFilter = const HistoryFilter();
   List<SchedulerEvent> schedulerHistory = [];
   Map<String, dynamic> workerDiagnostics = {};
+  List<String> savedFilterOrder = [];
 
   // Filter Draft State
   String? editingId;
@@ -153,15 +154,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _log.loadPersisted();
     _catalog = await _catalogService.getCatalog();
     
-    savedSearches = await _storage.loadSearches();
-    for (var s in savedSearches) {
-      debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE LOAD');
-      debugPrint('[STORAGE_MODEL_DEBUG] filter="${s.name}"');
-      debugPrint('[STORAGE_MODEL_DEBUG] model="${s.model}"');
-      debugPrint('[STORAGE_MODEL_DEBUG] modelSearchValue="${s.modelSearchValue}"');
-      debugPrint('[STORAGE_MODEL_DEBUG] modelId="${s.modelId}"');
-      debugPrint('[STORAGE_MODEL_DEBUG] subModelGroup="${s.subModelGroup}"');
-    }
+    final rawSearches = await _storage.loadSearches();
+    savedFilterOrder = await _storage.loadSavedFilterOrder();
+    savedSearches = _sortSearchesBySavedOrder(rawSearches, savedFilterOrder);
     savedListings = await _storage.loadListings();
     historyFilter = await _storage.loadHistoryFilter();
     schedulerHistory = await _storage.loadSchedulerHistory();
@@ -326,12 +321,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   void onModelChanged(String? modelName) {
     selectedModel = modelName ?? '';
 
-    debugPrint('[MODEL_SELECT_DEBUG] selectedMake="$selectedMake"');
-    debugPrint('[MODEL_SELECT_DEBUG] selectedModel="$selectedModel"');
-    debugPrint(
-      '[MODEL_SELECT_DEBUG] availableModels count=${availableModels.length}',
-    );
-
     final modelData = availableModels.firstWhere(
       (m) => m.displayName == modelName,
       orElse: () => AvtonetModel(
@@ -340,25 +329,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       ),
     );
 
-    debugPrint(
-      '[MODEL_SELECT_DEBUG] FOUND '
-      'displayName="${modelData.displayName}" '
-      'searchValue="${modelData.searchValue}" '
-      'modelId="${modelData.modelId}" '
-      'subModelGroup="${modelData.subModelGroup}"',
-    );
-
     selectedModelSearchValue = modelData.searchValue;
     selectedModelId = modelData.modelId;
     selectedSubModelGroup = modelData.subModelGroup;
-
-    debugPrint(
-      '[MODEL_SELECT_DEBUG] SAVED STATE '
-      'selectedModel="$selectedModel" '
-      'selectedModelSearchValue="$selectedModelSearchValue" '
-      'selectedModelId="$selectedModelId" '
-      'selectedSubModelGroup="$selectedSubModelGroup"',
-    );
 
     _updateAutoNameIfNeeded();
     notifyListeners();
@@ -392,14 +365,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<bool> saveCurrentSearch() async {
     final name = draftSearchName.trim().isEmpty ? _defaultSearchName() : draftSearchName.trim();
     String oblikaCsv = selectedBodyTypes.isEmpty ? '0' : selectedBodyTypes.join(',');
-    debugPrint('[SAVE_MODEL_DEBUG] BEFORE SAVE');
-    debugPrint('[SAVE_MODEL_DEBUG] selectedMake="$selectedMake"');
-    debugPrint('[SAVE_MODEL_DEBUG] selectedModel="$selectedModel"');
-    debugPrint(
-      '[SAVE_MODEL_DEBUG] selectedModelSearchValue="$selectedModelSearchValue"',
-    );
-    debugPrint('[SAVE_MODEL_DEBUG] selectedModelId="$selectedModelId"');
-    debugPrint('[SAVE_MODEL_DEBUG] selectedSubModelGroup="$selectedSubModelGroup"');
     final config = SearchConfig(
       id: editingId ?? DateTime.now().millisecondsSinceEpoch.toString(), 
       name: name, 
@@ -414,16 +379,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       powerUnit: powerUnit, bencin: selectedFuel, menjalnik: selectedTransmission, createdAt: DateTime.now(),
     );
 
-    debugPrint('[CONFIG_MODEL_DEBUG] AFTER CONFIG CONSTRUCTION');
-    debugPrint('[CONFIG_MODEL_DEBUG] model="${config.model}"');
-    debugPrint(
-      '[CONFIG_MODEL_DEBUG] modelSearchValue="${config.modelSearchValue}"',
-    );
-    debugPrint('[CONFIG_MODEL_DEBUG] modelId="${config.modelId}"');
-    debugPrint(
-      '[CONFIG_MODEL_DEBUG] subModelGroup="${config.subModelGroup}"',
-    );
-
     if (editingId != null) {
       final idx = savedSearches.indexWhere((s) => s.id == editingId);
       if (idx != -1) savedSearches[idx] = config.copyWith(lastChecked: savedSearches[idx].lastChecked, lastStatus: savedSearches[idx].lastStatus);
@@ -432,29 +387,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       savedSearches = [...savedSearches, config];
     }
 
-    debugPrint('[STORAGE_MODEL_DEBUG] BEFORE STORAGE SAVE');
-    debugPrint('[STORAGE_MODEL_DEBUG] model="${config.model}"');
-    debugPrint(
-      '[STORAGE_MODEL_DEBUG] modelSearchValue="${config.modelSearchValue}"',
-    );
-    debugPrint('[STORAGE_MODEL_DEBUG] modelId="${config.modelId}"');
-    debugPrint(
-      '[STORAGE_MODEL_DEBUG] subModelGroup="${config.subModelGroup}"',
-    );
-
+    savedFilterOrder = savedSearches.map((s) => s.id).toList();
+    await _storage.saveSavedFilterOrder(savedFilterOrder);
     await _storage.saveSearches(savedSearches);
-
-    // Verify what is in the RAM list after save
-    final savedFilter = savedSearches.firstWhere((s) => s.id == (editingId ?? config.id));
-    debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE SAVE');
-    debugPrint('[STORAGE_MODEL_DEBUG] model="${savedFilter.model}"');
-    debugPrint(
-      '[STORAGE_MODEL_DEBUG] modelSearchValue="${savedFilter.modelSearchValue}"',
-    );
-    debugPrint('[STORAGE_MODEL_DEBUG] modelId="${savedFilter.modelId}"');
-    debugPrint(
-      '[STORAGE_MODEL_DEBUG] subModelGroup="${savedFilter.subModelGroup}"',
-    );
 
     editingId = null; notifyListeners();
     return true;
@@ -471,15 +406,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       // RELOAD searches from disk AFTER potentially waiting for lock inside ScanEngine
       // This ensures we have the most up-to-date config (e.g. from Background Worker)
       final freshSearches = await _storage.loadSearches();
-
-      for (var s in freshSearches) {
-        debugPrint('[STORAGE_MODEL_DEBUG] AFTER STORAGE LOAD (SCAN)');
-        debugPrint('[STORAGE_MODEL_DEBUG] filter="${s.name}"');
-        debugPrint('[STORAGE_MODEL_DEBUG] model="${s.model}"');
-        debugPrint('[STORAGE_MODEL_DEBUG] modelSearchValue="${s.modelSearchValue}"');
-        debugPrint('[STORAGE_MODEL_DEBUG] modelId="${s.modelId}"');
-        debugPrint('[STORAGE_MODEL_DEBUG] subModelGroup="${s.subModelGroup}"');
-      }
       
       List<SearchConfig> configsToPass;
       if (singleId != null) {
@@ -560,7 +486,63 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     if (idx != -1) { savedSearches[idx] = savedSearches[idx].copyWith(isEnabled: enabled); await _storage.saveSearches(savedSearches); notifyListeners(); }
   }
 
-  Future<void> deleteSearch(String id) async { savedSearches = savedSearches.where((s) => s.id != id).toList(); await _storage.saveSearches(savedSearches); notifyListeners(); }
+  List<SearchConfig> _sortSearchesBySavedOrder(
+    List<SearchConfig> rawSearches,
+    List<String> savedOrderIds,
+  ) {
+    if (rawSearches.isEmpty) return [];
+
+    final Map<String, SearchConfig> searchMap = {
+      for (var s in rawSearches) s.id: s
+    };
+
+    final List<SearchConfig> ordered = [];
+    final Set<String> processedIds = {};
+
+    for (final id in savedOrderIds) {
+      if (searchMap.containsKey(id) && !processedIds.contains(id)) {
+        ordered.add(searchMap[id]!);
+        processedIds.add(id);
+      }
+    }
+
+    for (final s in rawSearches) {
+      if (!processedIds.contains(s.id)) {
+        ordered.add(s);
+        processedIds.add(s.id);
+      }
+    }
+
+    return ordered;
+  }
+
+  Future<void> reorderSavedSearches(int oldIndex, int newIndex) async {
+    if (oldIndex < 0 || oldIndex >= savedSearches.length) return;
+    if (newIndex < 0 || newIndex > savedSearches.length) return;
+
+    if (newIndex > oldIndex) {
+      newIndex -= 1;
+    }
+
+    final items = List<SearchConfig>.from(savedSearches);
+    final movedItem = items.removeAt(oldIndex);
+    items.insert(newIndex, movedItem);
+
+    savedSearches = items;
+    savedFilterOrder = items.map((s) => s.id).toList();
+
+    await _storage.saveSavedFilterOrder(savedFilterOrder);
+    await _storage.saveSearches(savedSearches);
+    notifyListeners();
+  }
+
+  Future<void> deleteSearch(String id) async {
+    savedSearches = savedSearches.where((s) => s.id != id).toList();
+    savedFilterOrder = savedSearches.map((s) => s.id).toList();
+    await _storage.saveSavedFilterOrder(savedFilterOrder);
+    await _storage.saveSearches(savedSearches);
+    notifyListeners();
+  }
   Future<void> removeListing(String id) async { savedListings = savedListings.where((l) => l.id != id).toList(); await _storage.saveListings(savedListings); notifyListeners(); }
   Future<void> clearListings() async { savedListings = []; await _storage.saveListings(savedListings); notifyListeners(); }
   Future<void> resetSeenDatabase() async { await _storage.clearSeenIds(); notifyListeners(); }

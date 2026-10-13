@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:avtonet_app/main.dart';
 import 'package:avtonet_app/controllers/app_controller.dart';
+import 'package:avtonet_app/services/avtonet_catalog_service.dart';
 import 'package:avtonet_app/services/avtonet_scraper_service.dart';
 import 'package:avtonet_app/services/catchup_service.dart';
 import 'package:avtonet_app/services/lifecycle_scheduler.dart';
@@ -15,6 +16,7 @@ void main() {
     final log = LogService();
     final storage = StorageService();
     final scraper = AvtonetScraperService(log);
+    final catalog = AvtonetCatalogService(scraper);
     final engine = ScanEngine(
       storage: storage,
       log: log,
@@ -25,12 +27,13 @@ void main() {
       storage: storage,
       log: log,
       scraper: scraper,
+      catalog: catalog,
       orchestrator: engine,
       catchUp: CatchUpService(storage: storage, orchestrator: engine),
       lifecycleScheduler: LifecycleScheduler(),
     );
 
     await tester.pumpWidget(AvtonetApp(controller: controller));
-    expect(find.text('avtonetFinder'), findsOneWidget);
+    expect(find.text('AvtoNet Skener'), findsOneWidget);
   });
 }

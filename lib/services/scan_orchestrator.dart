@@ -7,6 +7,7 @@ import 'avtonet_scraper_service.dart';
 import 'log_service.dart';
 import 'notification_service.dart';
 import 'storage_service.dart';
+import 'dart:async';
 
 class ScanEngineResult {
   const ScanEngineResult({
@@ -98,7 +99,16 @@ class ScanEngine {
         error: 'Skeniranje že poteka (aktivna ključavnica).',
       );
     }
-    
+
+    Timer? lockHeartbeatTimer;
+
+    lockHeartbeatTimer = Timer.periodic(
+      const Duration(seconds: 30),
+          (_) {
+        _storage.heartbeatScanLock(lockOwnerId);
+      },
+    );
+
     try {
       var successCount = 0;
       var failCount = 0;
@@ -108,10 +118,6 @@ class ScanEngine {
       final updatedConfigs = List<SearchConfig>.from(searches);
       final List<String> seenIdsList = await _storage.getSeenIds();
       final Set<String> seenIds = Set<String>.from(seenIdsList);
-      debugPrint('[SCAN_DEBUG] seenIds count=${seenIds.length}');
-      debugPrint(
-        '[SCAN_DEBUG] seenIds sample=${seenIds.take(10).toList()}',
-      );
 
       List<int> slotsToScan;
       if (singleId != null) {
@@ -332,6 +338,7 @@ class ScanEngine {
       debugPrint('[SCAN] Failed (Exception)');
       rethrow;
     } finally {
+      lockHeartbeatTimer?.cancel();
       await _storage.releaseScanLock(lockOwnerId);
     }
   }

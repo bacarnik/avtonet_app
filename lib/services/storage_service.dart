@@ -19,6 +19,8 @@ class StorageService {
   static const keyLastScanNewCount = 'last_scan_new_ads_count';
   static const keySchedulerHistory = 'scheduler_history_v1';
   static const keyScanDiagnostics = 'scan_diagnostics_v1';
+  static const keySavedFilterOrder = 'saved_filter_order_v1';
+  static const keyScanLockHeartbeat = 'scan_lock_heartbeat';
 
   // Worker Diagnostics
   static const keyWorkerStartedAt = 'worker_started_at';
@@ -118,37 +120,103 @@ class StorageService {
 
   Future<bool> acquireScanLock(String owner) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.reload(); // Critical for Background Isolate to see released lock
+    await prefs.reload();
+
     final isLocked = prefs.getBool('scan_lock_active') ?? false;
     final lockOwner = prefs.getString('scan_lock_owner') ?? 'unknown';
     final lockTime = prefs.getInt('scan_lock_time') ?? 0;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final ageSeconds = (now - lockTime) ~/ 1000;
+    final heartbeat = prefs.getInt(keyScanLockHeartbeat) ?? lockTime;
 
-    debugPrint('[SCAN_LOCK] CHECK requester=$owner active=$isLocked owner=$lockOwner age=${ageSeconds}s');
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final ageSeconds = (now - heartbeat) ~/ 1000;
+
+    debugPrint(
+      '[SCAN_LOCK] CHECK '
+          'requester=$owner '
+          'active=$isLocked '
+          'owner=$lockOwner '
+          'heartbeatAge=${ageSeconds}s',
+    );
 
     if (isLocked) {
-      // Stale lock: 20 minutes is enough for background scan
-      if (now - lockTime < 20 * 60 * 1000) {
-        debugPrint('[SCAN_LOCK] DENIED requester=$owner owner=$lockOwner age=${ageSeconds}s');
+      // The scan must refresh its heartbeat while it is alive.
+      // If there is no heartbeat for 2 minutes, the owner is considered stale.
+      const staleAfterMs = 2 * 60 * 1000;
+
+      if (now - heartbeat < staleAfterMs) {
+        debugPrint(
+          '[SCAN_LOCK] DENIED '
+              'requester=$owner '
+              'owner=$lockOwner '
+              'heartbeatAge=${ageSeconds}s',
+        );
         return false;
-      } else {
-        debugPrint('[SCAN] [WARN] Stale lock detected, overriding (Current: $lockOwner, New: $owner)');
       }
+
+      debugPrint(
+        '[SCAN_LOCK] STALE OVERRIDE '
+            'oldOwner=$lockOwner '
+            'heartbeatAge=${ageSeconds}s '
+            'newOwner=$owner',
+      );
     }
-    
+
     await prefs.setBool('scan_lock_active', true);
     await prefs.setInt('scan_lock_time', now);
+    await prefs.setInt(keyScanLockHeartbeat, now);
     await prefs.setString('scan_lock_owner', owner);
+
     debugPrint('[SCAN_LOCK] ACQUIRED owner=$owner');
+
     return true;
+  }
+
+  Future<void> heartbeatScanLock(String owner) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+
+      final isLocked = prefs.getBool('scan_lock_active') ?? false;
+      final currentOwner = prefs.getString('scan_lock_owner') ?? 'unknown';
+
+      if (!isLocked) {
+        debugPrint(
+          '[SCAN_LOCK] HEARTBEAT SKIPPED: lock is not active '
+              'owner=$owner',
+        );
+        return;
+      }
+
+      if (currentOwner != owner) {
+        debugPrint(
+          '[SCAN_LOCK] HEARTBEAT DENIED: owner mismatch '
+              'current=$currentOwner requester=$owner',
+        );
+        return;
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      await prefs.setInt(keyScanLockHeartbeat, now);
+
+      debugPrint(
+        '[SCAN_LOCK] HEARTBEAT owner=$owner',
+      );
+    } catch (e) {
+      debugPrint(
+        '[SCAN_LOCK] HEARTBEAT ERROR owner=$owner: $e',
+      );
+    }
   }
 
   Future<void> releaseScanLock(String owner) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
-    final currentOwner = prefs.getString('scan_lock_owner') ?? 'unknown';
-    final isLocked = prefs.getBool('scan_lock_active') ?? false;
+
+    final currentOwner =
+        prefs.getString('scan_lock_owner') ?? 'unknown';
+    final isLocked =
+        prefs.getBool('scan_lock_active') ?? false;
 
     if (!isLocked) {
       debugPrint('[SCAN_LOCK] RELEASE SKIPPED: Not locked');
@@ -156,10 +224,15 @@ class StorageService {
     }
 
     if (currentOwner != owner) {
-      debugPrint('[SCAN_LOCK] RELEASE DENIED: Owner mismatch (Current: $currentOwner, Requester: $owner)');
+      debugPrint(
+        '[SCAN_LOCK] RELEASE DENIED: Owner mismatch '
+            '(Current: $currentOwner, Requester: $owner)',
+      );
+
       await addWorkerHistoryEvent(
         status: 'LOCK_RELEASE_DENIED',
-        message: 'Owner mismatch. Current: $currentOwner, Requester: $owner',
+        message:
+        'Owner mismatch. Current: $currentOwner, Requester: $owner',
       );
       return;
     }
@@ -168,6 +241,7 @@ class StorageService {
 
     await prefs.setBool('scan_lock_active', false);
     await prefs.remove('scan_lock_time');
+    await prefs.remove(keyScanLockHeartbeat);
     await prefs.remove('scan_lock_owner');
 
     debugPrint('[SCAN_LOCK] RELEASE COMPLETE owner=$owner');
@@ -433,5 +507,15 @@ class StorageService {
       'usedHttpClient': prefs.getBool(keyWorkerUsedHttpClient),
       'usedWebView': prefs.getBool(keyWorkerUsedWebView),
     };
+  }
+
+  Future<List<String>> loadSavedFilterOrder() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(keySavedFilterOrder) ?? [];
+  }
+
+  Future<void> saveSavedFilterOrder(List<String> order) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(keySavedFilterOrder, order);
   }
 }

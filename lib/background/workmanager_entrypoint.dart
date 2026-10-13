@@ -88,6 +88,7 @@ void callbackDispatcher() {
         final currentListings = await storage.loadListings();
         
         await storage.addWorkerHistoryEvent(status: 'SCAN_STARTED');
+        debugPrint('[WORKER_TRACE] engine.scan() START');
         result = await engine.scan(
           searches: searches,
           currentListings: currentListings,
@@ -95,6 +96,7 @@ void callbackDispatcher() {
           isAuto: true,
           ownerOverride: 'WORKER',
         );
+        debugPrint('[WORKER_TRACE] engine.scan() RETURN (ok=${result.ok}, new=${result.newListings})');
         await storage.addWorkerHistoryEvent(status: 'SCAN_FINISHED');
 
         successCount = result.successCount;
@@ -120,6 +122,7 @@ void callbackDispatcher() {
         await scraper.dispose().timeout(const Duration(seconds: 5), onTimeout: () {});
       }
 
+      debugPrint('[WORKER_TRACE] recordWorkerFinish() START');
       await storage.recordWorkerFinish(
         DateTime.now(), 
         exitReason == 'SCAN_SUCCESS',
@@ -128,7 +131,9 @@ void callbackDispatcher() {
         notificationsSent: result?.notificationsSent ?? 0,
         resultStatus: exitReason,
       );
+      debugPrint('[WORKER_TRACE] recordWorkerFinish() END');
       
+      debugPrint('[WORKER_TRACE] recordWorkerStats() START');
       await storage.recordWorkerStats(
         durationMs: stopwatch.elapsedMilliseconds,
         activeFilters: activeCount,
@@ -137,7 +142,9 @@ void callbackDispatcher() {
         usedHttpClient: true,
         usedWebView: true,
       );
+      debugPrint('[WORKER_TRACE] recordWorkerStats() END');
 
+      debugPrint('[WORKER_TRACE] final addWorkerHistoryEvent() START');
       await storage.addWorkerHistoryEvent(
         status: exitReason, 
         durationMs: stopwatch.elapsedMilliseconds,
@@ -145,7 +152,9 @@ void callbackDispatcher() {
       );
 
       await storage.addWorkerHistoryEvent(status: 'WORKER_FINISHED', exitReason: exitReason);
+      debugPrint('[WORKER_TRACE] final addWorkerHistoryEvent() END');
 
+      debugPrint('[WORKER_TRACE] return true START');
       return true;
     } catch (e, stack) {
       if (stack != null) debugPrint(stack.toString());

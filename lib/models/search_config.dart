@@ -172,13 +172,17 @@ class SearchConfig {
         finalSearchValue = subGroup;
       }
     } else {
-      // Za konkretne modele: če modelId manjka, ga vzamemo iz legacy polja
-      if (finalModelId == null && legacyModel.isNotEmpty && !legacyModel.endsWith(':')) {
-        finalModelId = legacyModel;
-      }
       // Če je searchValue prazna pri starem zapisu BMW serije (ki nima subGroup)
       if (finalSearchValue.isEmpty && legacyModel.endsWith(':')) {
         finalSearchValue = legacyModel;
+      }
+
+      // Za podmodele (ko je finalSearchValue ne-prazna in ni skupina), modelId NE SME biti nastavljen!
+      if (finalSearchValue.isNotEmpty) {
+        finalModelId = null;
+      } else if (finalModelId == null && legacyModel.isNotEmpty) {
+        // Za konkretne navadne modele brez ID (stari legacy zapis): vzamemo iz legacy polja
+        finalModelId = legacyModel;
       }
     }
 

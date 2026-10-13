@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 
 import '../controllers/app_controller.dart';
 import '../data/filter_options.dart';
-import '../models/avtonet_catalog_models.dart';
 import '../widgets/body_type_grid.dart';
 
 class SearchTab extends StatefulWidget {
@@ -26,12 +25,32 @@ class _SearchTabState extends State<SearchTab> {
   late final TextEditingController _mocMinCtrl;
   late final TextEditingController _mocMaxCtrl;
 
+  late final FocusNode _nameFocus;
+  late final FocusNode _kmMinFocus;
+  late final FocusNode _kmMaxFocus;
+  late final FocusNode _letnikMinFocus;
+  late final FocusNode _letnikMaxFocus;
+  late final FocusNode _cenaMinFocus;
+  late final FocusNode _cenaMaxFocus;
+  late final FocusNode _mocMinFocus;
+  late final FocusNode _mocMaxFocus;
+
   AppController get c => widget.controller;
 
   @override
   void initState() {
     super.initState();
     c.addListener(_onControllerChanged);
+    _nameFocus = FocusNode();
+    _kmMinFocus = FocusNode();
+    _kmMaxFocus = FocusNode();
+    _letnikMinFocus = FocusNode();
+    _letnikMaxFocus = FocusNode();
+    _cenaMinFocus = FocusNode();
+    _cenaMaxFocus = FocusNode();
+    _mocMinFocus = FocusNode();
+    _mocMaxFocus = FocusNode();
+
     _nameCtrl = TextEditingController(text: c.draftSearchName);
     _kmMinCtrl = TextEditingController(text: c.kmMinText);
     _kmMaxCtrl = TextEditingController(text: c.kmMaxText);
@@ -46,6 +65,16 @@ class _SearchTabState extends State<SearchTab> {
   @override
   void dispose() {
     c.removeListener(_onControllerChanged);
+    _nameFocus.dispose();
+    _kmMinFocus.dispose();
+    _kmMaxFocus.dispose();
+    _letnikMinFocus.dispose();
+    _letnikMaxFocus.dispose();
+    _cenaMinFocus.dispose();
+    _cenaMaxFocus.dispose();
+    _mocMinFocus.dispose();
+    _mocMaxFocus.dispose();
+
     _nameCtrl.dispose();
     _kmMinCtrl.dispose();
     _kmMaxCtrl.dispose();
@@ -59,8 +88,20 @@ class _SearchTabState extends State<SearchTab> {
   }
 
   void _onControllerChanged() {
-    if (_nameCtrl.text != c.draftSearchName) {
-      _nameCtrl.text = c.draftSearchName;
+    _syncController(_nameCtrl, _nameFocus, c.draftSearchName);
+    _syncController(_kmMinCtrl, _kmMinFocus, c.kmMinText ?? '');
+    _syncController(_kmMaxCtrl, _kmMaxFocus, c.kmMaxText ?? '');
+    _syncController(_letnikMinCtrl, _letnikMinFocus, c.letnikMinText ?? '');
+    _syncController(_letnikMaxCtrl, _letnikMaxFocus, c.letnikMaxText ?? '');
+    _syncController(_cenaMinCtrl, _cenaMinFocus, c.cenaMinText ?? '');
+    _syncController(_cenaMaxCtrl, _cenaMaxFocus, c.cenaMaxText ?? '');
+    _syncController(_mocMinCtrl, _mocMinFocus, c.mocMinText ?? '');
+    _syncController(_mocMaxCtrl, _mocMaxFocus, c.mocMaxText ?? '');
+  }
+
+  void _syncController(TextEditingController ctrl, FocusNode fn, String expected) {
+    if (!fn.hasFocus && ctrl.text != expected) {
+      ctrl.text = expected;
     }
   }
 
@@ -71,7 +112,6 @@ class _SearchTabState extends State<SearchTab> {
         color: Theme.of(context).scaffoldBackgroundColor,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -87,96 +127,130 @@ class _SearchTabState extends State<SearchTab> {
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
-              child: ListenableBuilder(
-                listenable: c,
-                builder: (context, _) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => Text(
+                      c.editingId == null ? 'Nova konfiguracija' : 'Uredi iskanje',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  _fieldLabel('Ime iskanja'),
+                  TextField(
+                    controller: _nameCtrl,
+                    focusNode: _nameFocus,
+                    decoration: const InputDecoration(hintText: 'npr. BMW serija 3'),
+                    onChanged: c.setDraftSearchName,
+                  ),
+                  const SizedBox(height: 20),
+
+                  _fieldLabel('Znamka in model'),
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => Column(
+                      children: [
+                        _makeDropdown(),
+                        const SizedBox(height: 12),
+                        _modelDropdown(),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
+                  _fieldLabel('Oblika vozila (več možnosti)'),
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => BodyTypeGrid(
+                      selectedCodes: c.selectedBodyTypes,
+                      onSelected: c.toggleBodyType,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  _fieldLabel('Cena (€)'),
+                  _pair(_cenaMinCtrl, _cenaMinFocus, 'Min', c.setCenaMin, _cenaMaxCtrl, _cenaMaxFocus, 'Max', c.setCenaMax),
+                  const SizedBox(height: 16),
+
+                  _fieldLabel('Letnik'),
+                  _pair(_letnikMinCtrl, _letnikMinFocus, 'Od', c.setLetnikMin, _letnikMaxCtrl, _letnikMaxFocus, 'Do', c.setLetnikMax),
+                  const SizedBox(height: 16),
+
+                  _fieldLabel('Kilometri'),
+                  _pair(_kmMinCtrl, _kmMinFocus, 'Min', c.setKmMin, _kmMaxCtrl, _kmMaxFocus, 'Max', c.setKmMax),
+                  const SizedBox(height: 24),
+
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        c.editingId == null ? 'Nova konfiguracija' : 'Uredi iskanje',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 24),
-                      
-                      _fieldLabel('Ime iskanja'),
-                      TextField(
-                        controller: _nameCtrl,
-                        decoration: const InputDecoration(hintText: 'npr. BMW serija 3'),
-                        onChanged: c.setDraftSearchName,
-                      ),
-                      const SizedBox(height: 20),
-                      
-                      _fieldLabel('Znamka in model'),
-                      _makeDropdown(),
-                      const SizedBox(height: 12),
-                      _modelDropdown(),
-                      const SizedBox(height: 20),
-
-                      _fieldLabel('Oblika vozila (več možnosti)'),
-                      BodyTypeGrid(
-                        selectedCodes: c.selectedBodyTypes,
-                        onSelected: c.toggleBodyType,
-                      ),
-                      const SizedBox(height: 24),
-
-                      _fieldLabel('Cena (€)'),
-                      _pair(_cenaMinCtrl, 'Min', c.setCenaMin, _cenaMaxCtrl, 'Max', c.setCenaMax),
-                      const SizedBox(height: 16),
-
-                      _fieldLabel('Letnik'),
-                      _pair(_letnikMinCtrl, 'Od', c.setLetnikMin, _letnikMaxCtrl, 'Do', c.setLetnikMax),
-                      const SizedBox(height: 16),
-
-                      _fieldLabel('Kilometri'),
-                      _pair(_kmMinCtrl, 'Min', c.setKmMin, _kmMaxCtrl, 'Max', c.setKmMax),
-                      const SizedBox(height: 24),
-
-                      // NEW: Power Unit Toggle (kW / KM)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          _fieldLabel('Moč motorja'),
-                          ToggleButtons(
-                            borderRadius: BorderRadius.circular(8),
-                            constraints: const BoxConstraints(minHeight: 28, minWidth: 48),
-                            isSelected: [c.powerUnit == 'kW', c.powerUnit == 'KM'],
-                            onPressed: (index) {
-                              c.setPowerUnit(index == 0 ? 'kW' : 'KM');
-                            },
-                            children: const [
-                              Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('kW', style: TextStyle(fontSize: 11))),
-                              Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('KM', style: TextStyle(fontSize: 11))),
-                            ],
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      _pair(_mocMinCtrl, 'Min (${c.powerUnit})', c.setMocMin, _mocMaxCtrl, 'Max (${c.powerUnit})', c.setMocMax),
-                      const SizedBox(height: 24),
-
-                      _fieldLabel('Gorivo in menjalnik'),
-                      _fuelDropdown(),
-                      const SizedBox(height: 12),
-                      _transmissionDropdown(),
-                      
-                      const SizedBox(height: 40),
-
-                      ElevatedButton(
-                        onPressed: () async {
-                          final success = await c.saveCurrentSearch();
-                          if (success && mounted) {
-                            Navigator.of(context).pop();
-                          }
-                        },
-                        child: Text(
-                          c.editingId == null ? 'SHRANI ISKANJE' : 'POSODOBI ISKANJE',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                      _fieldLabel('Moč motorja'),
+                      ListenableBuilder(
+                        listenable: c,
+                        builder: (context, _) => ToggleButtons(
+                          borderRadius: BorderRadius.circular(8),
+                          constraints: const BoxConstraints(minHeight: 28, minWidth: 48),
+                          isSelected: [c.powerUnit == 'kW', c.powerUnit == 'KM'],
+                          onPressed: (index) {
+                            c.setPowerUnit(index == 0 ? 'kW' : 'KM');
+                          },
+                          children: const [
+                            Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('kW', style: TextStyle(fontSize: 11))),
+                            Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('KM', style: TextStyle(fontSize: 11))),
+                          ],
                         ),
                       ),
                     ],
-                  );
-                },
+                  ),
+                  const SizedBox(height: 8),
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => _pair(
+                      _mocMinCtrl,
+                      _mocMinFocus,
+                      'Min (${c.powerUnit})',
+                      c.setMocMin,
+                      _mocMaxCtrl,
+                      _mocMaxFocus,
+                      'Max (${c.powerUnit})',
+                      c.setMocMax,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  _fieldLabel('Gorivo in menjalnik'),
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => Column(
+                      children: [
+                        _fuelDropdown(),
+                        const SizedBox(height: 12),
+                        _transmissionDropdown(),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 40),
+
+                  ListenableBuilder(
+                    listenable: c,
+                    builder: (context, _) => ElevatedButton(
+                      onPressed: () async {
+                        final nav = Navigator.of(context);
+                        final success = await c.saveCurrentSearch();
+                        if (success && mounted) {
+                          nav.pop();
+                        }
+                      },
+                      child: Text(
+                        c.editingId == null ? 'SHRANI ISKANJE' : 'POSODOBI ISKANJE',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -190,12 +264,13 @@ class _SearchTabState extends State<SearchTab> {
     child: Text(t, style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.bold)),
   );
 
-  /// Fixed Row Overflows with Expanded/Flexible.
   Widget _pair(
     TextEditingController a,
+    FocusNode aFocus,
     String aLabel,
     void Function(String) onA,
     TextEditingController b,
+    FocusNode bFocus,
     String bLabel,
     void Function(String) onB,
   ) {
@@ -204,6 +279,7 @@ class _SearchTabState extends State<SearchTab> {
         Expanded(
           child: TextField(
             controller: a,
+            focusNode: aFocus,
             keyboardType: TextInputType.number,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(labelText: aLabel),
@@ -214,6 +290,7 @@ class _SearchTabState extends State<SearchTab> {
         Expanded(
           child: TextField(
             controller: b,
+            focusNode: bFocus,
             keyboardType: TextInputType.number,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             decoration: InputDecoration(labelText: bLabel),
@@ -227,7 +304,6 @@ class _SearchTabState extends State<SearchTab> {
   Widget _makeDropdown() {
     final brands = c.allBrands;
 
-    // 1. Define top/popular brand names
     final topNames = [
       'Audi',
       'BMW',
@@ -237,8 +313,6 @@ class _SearchTabState extends State<SearchTab> {
       'Volkswagen'
     ];
 
-    // 2. Separate top brands and the rest to avoid duplicate values
-    // Using dynamic to be safe if types are not perfectly resolved during build
     final topBrands = [];
     final topValues = <String>{};
 
@@ -250,7 +324,6 @@ class _SearchTabState extends State<SearchTab> {
       } catch (_) {}
     }
 
-    // 3. Get remaining brands and sort them alphabetically
     final remainingBrands = brands.where((b) => !topValues.contains(b.value)).toList();
     remainingBrands.sort(
       (a, b) => a.displayName.toLowerCase().compareTo(
@@ -260,10 +333,8 @@ class _SearchTabState extends State<SearchTab> {
 
     final items = <DropdownMenuItem<String>>[];
 
-    // A. Initial item
     items.add(const DropdownMenuItem(value: '', child: Text('Izberi znamko')));
 
-    // B. PRILJUBLJENE Separator
     items.add(const DropdownMenuItem(
       value: '---sep-fav---',
       enabled: false,
@@ -275,7 +346,6 @@ class _SearchTabState extends State<SearchTab> {
       ),
     ));
 
-    // C. TOP BRANDS
     for (var b in topBrands) {
       items.add(DropdownMenuItem(
         value: b.value,
@@ -283,7 +353,6 @@ class _SearchTabState extends State<SearchTab> {
       ));
     }
 
-    // D. VSE ZNAMKE Separator
     items.add(const DropdownMenuItem(
       value: '---sep-all---',
       enabled: false,
@@ -295,7 +364,6 @@ class _SearchTabState extends State<SearchTab> {
       ),
     ));
 
-    // E. REMAINING BRANDS (alphabetical A-Z)
     for (var b in remainingBrands) {
       items.add(DropdownMenuItem(
         value: b.value,
@@ -316,14 +384,48 @@ class _SearchTabState extends State<SearchTab> {
   }
 
   Widget _modelDropdown() {
-    final models = c.modelsForMake(c.selectedMake);
-    
+    final availableModels = c.availableModels;
+    final items = <DropdownMenuItem<String>>[];
+
+    items.add(const DropdownMenuItem(
+      value: '',
+      child: Text('Vsi modeli', overflow: TextOverflow.ellipsis),
+    ));
+
+    bool inGroup = false;
+
+    for (final m in availableModels) {
+      final isGroup = (m.subModelGroup != null && m.subModelGroup!.isNotEmpty) ||
+          m.displayName.toLowerCase().contains('(vsi)');
+
+      if (isGroup) {
+        inGroup = true;
+      } else if (m.modelId != null && m.modelId!.isNotEmpty) {
+        inGroup = false;
+      }
+
+      String displayText = m.displayName;
+      if (displayText.endsWith(':')) {
+        displayText = displayText.substring(0, displayText.length - 1);
+      }
+
+      if (inGroup && !isGroup) {
+        displayText = '    $displayText';
+      }
+
+      items.add(DropdownMenuItem<String>(
+        value: m.displayName,
+        child: Text(
+          displayText,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ));
+    }
+
     return DropdownButtonFormField<String>(
       value: c.selectedModel,
       isExpanded: true,
-      items: ['', ...models]
-          .map((m) => DropdownMenuItem(value: m, child: Text(m.isEmpty ? 'Vsi modeli' : m, overflow: TextOverflow.ellipsis)))
-          .toList(),
+      items: items,
       onChanged: c.isModelDropdownEnabled ? c.onModelChanged : null,
     );
   }

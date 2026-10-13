@@ -197,6 +197,19 @@ AvtonetCatalogData _parseCatalogInBackground(String html) {
         }
       }
 
+      if (displayName.toLowerCase().contains('gran turismo')) {
+        debugPrint(
+          '[GT_MODEL_DEBUG] '
+              'displayName="$displayName" '
+              'rawValue="$value" '
+              'isIndented=$isIndented '
+              'isGroup=$isGroup '
+              'searchValue="$searchValue" '
+              'modelId="$modelId" '
+              'subModelGroup="$subModelGroup"',
+        );
+      }
+
       final model = AvtonetModel(
         displayName: displayName,
         searchValue: searchValue,

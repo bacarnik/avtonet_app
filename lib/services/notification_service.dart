@@ -41,11 +41,15 @@ class NotificationService {
   /// Fires an individual push notification for a single car record.
   /// Returns true if successfully displayed.
   Future<bool> notifyNewAd(CarListing ad) async {
+    debugPrint('[NOTIFICATION_TRACE] ENTRY notifyNewAd adId=${ad.id}');
     try {
       final platform = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       if (platform != null) {
+        debugPrint('[NOTIFICATION_TRACE] BEFORE areNotificationsEnabled adId=${ad.id}');
         final notificationsEnabled = await platform.areNotificationsEnabled() ?? false;
+        debugPrint('[NOTIFICATION_TRACE] AFTER areNotificationsEnabled adId=${ad.id} enabled=$notificationsEnabled');
         if (!notificationsEnabled) {
+          debugPrint('[NOTIFICATION_TRACE] EXIT notifyNewAd adId=${ad.id} result=false (disabled)');
           return false;
         }
       }
@@ -62,7 +66,7 @@ class NotificationService {
 
       final androidDetails = AndroidNotificationDetails(
         'avtonet_finder_channel',
-        'Avto.net Finder Alerts',
+        'AvtoNet Skener Alerts',
         channelDescription: 'Individual vehicle tracking update notifications',
         importance: Importance.max,
         priority: Priority.high,
@@ -71,6 +75,7 @@ class NotificationService {
         ticker: 'ticker',
       );
 
+      debugPrint('[NOTIFICATION_TRACE] BEFORE _plugin.show adId=${ad.id}');
       await _plugin.show(
         ad.id.hashCode,
         title,
@@ -78,9 +83,16 @@ class NotificationService {
         NotificationDetails(android: androidDetails),
         payload: ad.link,
       );
+      debugPrint('[NOTIFICATION_TRACE] AFTER _plugin.show adId=${ad.id}');
+
+      debugPrint('[NOTIFICATION_TRACE] BEFORE recordNotificationSent adId=${ad.id}');
       await _storage.recordNotificationSent(DateTime.now());
+      debugPrint('[NOTIFICATION_TRACE] AFTER recordNotificationSent adId=${ad.id}');
+
+      debugPrint('[NOTIFICATION_TRACE] EXIT notifyNewAd adId=${ad.id} result=true');
       return true;
     } catch (e, stack) {
+      debugPrint('[NOTIFICATION_TRACE] ERROR notifyNewAd adId=${ad.id}: $e');
       debugPrint('[NOTIFICATION] [ERROR] Send failed id=${ad.id}: $e');
       if (stack != null) debugPrint(stack.toString());
       return false;

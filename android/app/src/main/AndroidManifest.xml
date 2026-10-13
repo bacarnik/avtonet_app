@@ -11,7 +11,7 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
 
     <application
-        android:label="Avto.net Skener"
+        android:label="AvtoNet Skener"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="false">
